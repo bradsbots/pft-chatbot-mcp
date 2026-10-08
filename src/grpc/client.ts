@@ -3,6 +3,11 @@ import * as protoLoader from "@grpc/proto-loader";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Config } from "../config.js";
+import {
+  loadRetryPolicy,
+  withRetry,
+  type RetryPolicy,
+} from "./retry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROTO_DIR = resolve(__dirname, "protos");
@@ -144,15 +149,58 @@ function promisify<TReq, TRes>(
     });
 }
 
+type ServiceName =
+  | "contentStorage"
+  | "envelopeStorage"
+  | "agentRegistry"
+  | "authService";
+
+/**
+ * Methods whose effects are not safe to repeat if the first attempt actually
+ * reached the server but the response was lost (for example a deadline hit
+ * after the write committed). These are never retried; transient failures
+ * surface to the caller, who holds the context to decide.
+ *
+ * Everything else is idempotent on the Keystone side: storeContent is
+ * content-addressed (same bytes -> same CID), storeAgentCard is an upsert
+ * keyed on the authenticated wallet, pings and reads have no side effects,
+ * and requestApiKey only issues a fresh challenge nonce.
+ */
+const NON_IDEMPOTENT_METHODS: ReadonlySet<string> = new Set([
+  "verifyAndIssueKey",
+  "storeEnvelope",
+  "deleteAgentCard",
+]);
+
+const DEFAULT_RECREATE_AFTER_FAILURES = 3;
+const ENV_RECREATE_AFTER = "KEYSTONE_GRPC_RECREATE_AFTER_FAILURES";
+
+function recreateAfterFailures(): number {
+  const raw = process.env[ENV_RECREATE_AFTER];
+  if (raw === undefined || raw === "") return DEFAULT_RECREATE_AFTER_FAILURES;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1 || value > 100) {
+    throw new Error(`${ENV_RECREATE_AFTER} must be an integer from 1 to 100`);
+  }
+  return value;
+}
+
 export class KeystoneClient {
-  private contentStorage: grpc.Client;
-  private envelopeStorage: grpc.Client;
-  private agentRegistry: grpc.Client;
-  private authService: grpc.Client;
+  private contentStorage!: grpc.Client;
+  private envelopeStorage!: grpc.Client;
+  private agentRegistry!: grpc.Client;
+  private authService!: grpc.Client;
   private apiKey: string | null;
+  private readonly target: string;
+  private readonly credentials: grpc.ChannelCredentials;
+  private readonly retryPolicy: RetryPolicy;
+  private readonly recreateAfter: number;
+  private consecutiveTransientFailures = 0;
 
   constructor(config: Config) {
     this.apiKey = config.keystoneApiKey;
+    this.retryPolicy = loadRetryPolicy();
+    this.recreateAfter = recreateAfterFailures();
 
     const target = config.keystoneGrpcUrl;
     // Default to TLS. Only use insecure for localhost/dev when explicitly opted in.
@@ -164,6 +212,15 @@ export class KeystoneClient {
     const credentials = isInsecure
       ? grpc.credentials.createInsecure()
       : grpc.credentials.createSsl();
+    this.target = target;
+    this.credentials = credentials;
+    this.buildServices();
+  }
+
+  /** Construct (or reconstruct) the four gRPC service stubs. */
+  private buildServices(): void {
+    const target = this.target;
+    const credentials = this.credentials;
 
     // Load storage proto
     const storagePkg = protoLoader.loadSync(
@@ -209,6 +266,65 @@ export class KeystoneClient {
     );
   }
 
+  /**
+   * Drop the current channels and build fresh stubs. Called automatically
+   * after `KEYSTONE_GRPC_RECREATE_AFTER_FAILURES` consecutive transient
+   * failures so a wedged HTTP/2 connection cannot poison every later call.
+   */
+  recreateChannels(): void {
+    this.close();
+    this.buildServices();
+    this.consecutiveTransientFailures = 0;
+  }
+
+  /** Current count of consecutive transient failures (resets on success). */
+  get transientFailureStreak(): number {
+    return this.consecutiveTransientFailures;
+  }
+
+  /**
+   * Invoke one unary RPC with retry on transient failure. The stub is
+   * re-resolved on every attempt so a channel recreation between attempts
+   * takes effect immediately.
+   */
+  private unary<TRes>(
+    service: ServiceName,
+    methodName: string,
+    request: unknown,
+    metadata?: grpc.Metadata
+  ): Promise<TRes> {
+    const policy: RetryPolicy = NON_IDEMPOTENT_METHODS.has(methodName)
+      ? { ...this.retryPolicy, maxAttempts: 1 }
+      : this.retryPolicy;
+    return withRetry<TRes>(
+      () => {
+        const stub = this[service];
+        const method = (stub as any)[methodName];
+        const call = promisify<unknown, TRes>(stub, method);
+        return call(request, metadata ?? new grpc.Metadata());
+      },
+      policy,
+      {
+        onSuccess: () => {
+          this.consecutiveTransientFailures = 0;
+        },
+        onTransientFailure: (error, attempt) => {
+          this.consecutiveTransientFailures += 1;
+          const code = (error as Partial<grpc.ServiceError>).code;
+          process.stderr.write(
+            `[grpc] WARN - ${methodName} attempt ${attempt} failed (code ${code ?? "n/a"}); retrying\n`
+          );
+          if (this.consecutiveTransientFailures >= this.recreateAfter) {
+            process.stderr.write(
+              `[grpc] WARN - ${this.consecutiveTransientFailures} consecutive transient failures; recreating Keystone channels\n`
+            );
+            this.recreateChannels();
+          }
+        },
+      }
+    );
+  }
+
   private authMetadata(): grpc.Metadata {
     const md = new grpc.Metadata();
     if (this.apiKey) {
@@ -224,11 +340,9 @@ export class KeystoneClient {
   // --- Auth Service ---
 
   async requestApiKey(walletAddress: string): Promise<RequestApiKeyResponse> {
-    const call = promisify<any, RequestApiKeyResponse>(
-      this.authService,
-      (this.authService as any).requestApiKey
-    );
-    return call({ walletAddress });
+    return this.unary<RequestApiKeyResponse>("authService", "requestApiKey", {
+      walletAddress,
+    });
   }
 
   async verifyAndIssueKey(
@@ -237,11 +351,11 @@ export class KeystoneClient {
     signatureHex: string,
     label: string
   ): Promise<VerifyAndIssueKeyResponse> {
-    const call = promisify<any, VerifyAndIssueKeyResponse>(
-      this.authService,
-      (this.authService as any).verifyAndIssueKey
+    return this.unary<VerifyAndIssueKeyResponse>(
+      "authService",
+      "verifyAndIssueKey",
+      { walletAddress, challengeNonce, signatureHex, label }
     );
-    return call({ walletAddress, challengeNonce, signatureHex, label });
   }
 
   // --- Content Storage ---
@@ -250,21 +364,23 @@ export class KeystoneClient {
     content: Buffer,
     contentType: string
   ): Promise<StoreContentResponse> {
-    const call = promisify<any, StoreContentResponse>(
-      this.contentStorage,
-      (this.contentStorage as any).storeContent
+    return this.unary<StoreContentResponse>(
+      "contentStorage",
+      "storeContent",
+      { content, contentType },
+      this.authMetadata()
     );
-    return call({ content, contentType }, this.authMetadata());
   }
 
   // --- Envelope Storage ---
 
   async storeEnvelope(envelope: any): Promise<StoreEnvelopeResponse> {
-    const call = promisify<any, StoreEnvelopeResponse>(
-      this.envelopeStorage,
-      (this.envelopeStorage as any).storeEnvelope
+    return this.unary<StoreEnvelopeResponse>(
+      "envelopeStorage",
+      "storeEnvelope",
+      { envelope },
+      this.authMetadata()
     );
-    return call({ envelope }, this.authMetadata());
   }
 
   async listEnvelopesBySender(
@@ -272,11 +388,12 @@ export class KeystoneClient {
     limit: number = 50,
     offset: number = 0
   ): Promise<{ envelopes: any[]; totalCount: number }> {
-    const call = promisify<any, any>(
-      this.envelopeStorage,
-      (this.envelopeStorage as any).listEnvelopesBySender
+    return this.unary<any>(
+      "envelopeStorage",
+      "listEnvelopesBySender",
+      { sender, limit, offset },
+      this.authMetadata()
     );
-    return call({ sender, limit, offset }, this.authMetadata());
   }
 
   // --- Agent Registry ---
@@ -305,13 +422,11 @@ export class KeystoneClient {
       minCostFirstMessageDrops?: string;
     }
   ): Promise<StoreAgentCardResponse> {
-    const call = promisify<any, StoreAgentCardResponse>(
-      this.agentRegistry,
-      (this.agentRegistry as any).storeAgentCard
-    );
     // agent_id is not sent -- the server derives it from the authenticated
     // wallet address (one wallet = one bot).
-    return call(
+    return this.unary<StoreAgentCardResponse>(
+      "agentRegistry",
+      "storeAgentCard",
       {
         agentCard: {
           name: agentCard.name,
@@ -351,11 +466,9 @@ export class KeystoneClient {
     limit: number = 20,
     includeInactive?: boolean
   ): Promise<SearchAgentsResponse> {
-    const call = promisify<any, SearchAgentsResponse>(
-      this.agentRegistry,
-      (this.agentRegistry as any).searchAgents
-    );
-    return call(
+    return this.unary<SearchAgentsResponse>(
+      "agentRegistry",
+      "searchAgents",
       {
         query: query || "",
         capabilities: capabilities || [],
@@ -368,27 +481,25 @@ export class KeystoneClient {
   }
 
   async getAgentCard(agentId: string): Promise<GetAgentCardResponse> {
-    const call = promisify<any, GetAgentCardResponse>(
-      this.agentRegistry,
-      (this.agentRegistry as any).getAgentCard
+    return this.unary<GetAgentCardResponse>(
+      "agentRegistry",
+      "getAgentCard",
+      { agentId },
+      this.authMetadata()
     );
-    return call({ agentId }, this.authMetadata());
   }
 
   async deleteAgentCard(agentId: string): Promise<Record<string, never>> {
-    const call = promisify<any, Record<string, never>>(
-      this.agentRegistry,
-      (this.agentRegistry as any).deleteAgentCard
+    return this.unary<Record<string, never>>(
+      "agentRegistry",
+      "deleteAgentCard",
+      { agentId },
+      this.authMetadata()
     );
-    return call({ agentId }, this.authMetadata());
   }
 
   async pingAgent(): Promise<PingAgentResponse> {
-    const call = promisify<any, PingAgentResponse>(
-      this.agentRegistry,
-      (this.agentRegistry as any).pingAgent
-    );
-    return call({}, this.authMetadata());
+    return this.unary<PingAgentResponse>("agentRegistry", "pingAgent", {}, this.authMetadata());
   }
 
   close(): void {

@@ -492,6 +492,10 @@ Most bots should use the default (fully shared) -- it enables server-side messag
 | `PFTL_WSS_URL` | No | `wss://ws.testnet.postfiat.org` | Chain WebSocket endpoint |
 | `IPFS_GATEWAY_URL` | No | `https://ipfs-testnet.postfiat.org` | Primary IPFS gateway for reads |
 | `KEYSTONE_GRPC_URL` | No | `keystone-grpc.postfiat.org:443` | Keystone gRPC service |
+| `KEYSTONE_GRPC_RETRY_ATTEMPTS` | No | `3` | Attempts per gRPC unary call including the first (1–10). `1` disables retry. Only transient failures (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`, connection resets) are retried, and only for idempotent calls. |
+| `KEYSTONE_GRPC_RETRY_BASE_MS` | No | `250` | Delay before the first retry; doubles on each retry. |
+| `KEYSTONE_GRPC_RETRY_MAX_MS` | No | `5000` | Upper bound on the retry delay. |
+| `KEYSTONE_GRPC_RECREATE_AFTER_FAILURES` | No | `3` | Rebuild the gRPC channels after this many consecutive transient failures. |
 | `PING_INTERVAL_MS` | No | `900000` (15 min) | Ping interval in ms. Set 0 to disable. |
 | `TASKNODE_ENCRYPTION_PUBKEY` | No | Testnet default | Base64-encoded X25519 public key for TaskNode message sharing. Set to `"none"` or `""` to disable. |
 
