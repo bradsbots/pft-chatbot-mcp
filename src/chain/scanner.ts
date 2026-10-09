@@ -35,22 +35,39 @@ export interface ScannedMessage {
   decodedMemo: DecodedMemo;
 }
 
+/** One page of account_tx results. */
+interface AccountTxPage {
+  transactions: any[];
+  /** Opaque resume marker when more results remain; undefined when exhausted. */
+  marker?: unknown;
+}
+
 /**
- * Call account_tx via JSON-RPC to fetch recent transactions for a wallet.
+ * Call account_tx via JSON-RPC for one page of a wallet's transactions.
+ *
+ * With `ledgerIndexMin` (a resume cursor) the page is requested oldest-first
+ * (`forward: true`) so that a window larger than one page truncates at the
+ * newest end, which the next cursor will pick up, instead of silently
+ * dropping the oldest messages. Without a cursor the most recent
+ * transactions are wanted, so the page is newest-first.
  */
-async function accountTx(
+async function accountTxPage(
   rpcUrl: string,
   account: string,
-  limit: number = 100,
-  ledgerIndexMin?: number
-): Promise<any[]> {
+  limit: number,
+  ledgerIndexMin?: number,
+  marker?: unknown
+): Promise<AccountTxPage> {
   const params: any = {
     account,
     limit,
-    forward: false,
+    forward: ledgerIndexMin != null,
   };
   if (ledgerIndexMin) {
     params.ledger_index_min = ledgerIndexMin;
+  }
+  if (marker != null) {
+    params.marker = marker;
   }
 
   const response = await fetch(rpcUrl, {
@@ -71,7 +88,41 @@ async function accountTx(
     throw new Error(`account_tx error: ${json.result.error_message || json.result.error}`);
   }
 
-  return json.result?.transactions || [];
+  return {
+    transactions: json.result?.transactions || [],
+    marker: json.result?.marker,
+  };
+}
+
+/** Maximum account_tx pages fetched per scan, a safety bound on RPC calls. */
+const MAX_ACCOUNT_TX_PAGES = 10;
+
+/**
+ * Fetch up to `limit` transactions, following account_tx markers across
+ * pages. `truncated` is true when more transactions remained unread (the
+ * node still returned a marker when the limit or page bound was reached).
+ */
+async function accountTx(
+  rpcUrl: string,
+  account: string,
+  limit: number = 100,
+  ledgerIndexMin?: number
+): Promise<{ transactions: any[]; truncated: boolean }> {
+  const transactions: any[] = [];
+  let marker: unknown = undefined;
+  for (let page = 0; page < MAX_ACCOUNT_TX_PAGES; page++) {
+    const remaining = limit - transactions.length;
+    if (remaining <= 0) {
+      return { transactions, truncated: marker != null };
+    }
+    const result = await accountTxPage(rpcUrl, account, remaining, ledgerIndexMin, marker);
+    transactions.push(...result.transactions);
+    marker = result.marker;
+    if (marker == null || result.transactions.length === 0) {
+      return { transactions: transactions.slice(0, limit), truncated: false };
+    }
+  }
+  return { transactions: transactions.slice(0, limit), truncated: marker != null };
 }
 
 /**
@@ -82,6 +133,17 @@ function rippleTimeToUnix(rippleTime: number): number {
   return rippleTime + 946684800;
 }
 
+export interface ScanResult {
+  messages: ScannedMessage[];
+  /**
+   * True when the scan window held more transactions than `limit` (or the
+   * page bound) allowed, so some were not examined. With a `sinceLedger`
+   * cursor the unread transactions are the newest ones; resume from the
+   * highest ledger index returned (inclusive) to pick them up.
+   */
+  truncated: boolean;
+}
+
 /**
  * Scan the bot's wallet for recent messages.
  * Returns decoded messages with memo type, CID, sender, amount, etc.
@@ -90,8 +152,8 @@ export async function scanMessages(
   config: Config,
   botAddress: string,
   options: { sinceLedger?: number; limit?: number } = {}
-): Promise<ScannedMessage[]> {
-  const txs = await accountTx(
+): Promise<ScanResult> {
+  const { transactions: txs, truncated } = await accountTx(
     config.pftlRpcUrl,
     botAddress,
     options.limit || 100,
@@ -202,7 +264,7 @@ export async function scanMessages(
     }
   }
 
-  return messages;
+  return { messages, truncated };
 }
 
 /**

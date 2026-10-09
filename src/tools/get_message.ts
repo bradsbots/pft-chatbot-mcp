@@ -36,7 +36,7 @@ export async function executeGetMessage(
 
   // If tx_hash provided, scan for the specific transaction to get its CID
   if (params.tx_hash && !cid) {
-    const messages = await scanMessages(config, keypair.address, { limit: 200 });
+    const { messages } = await scanMessages(config, keypair.address, { limit: 200 });
     const msg = messages.find((m) => m.txHash === params.tx_hash);
     if (!msg) {
       return `Error: transaction ${params.tx_hash} not found in recent history`;

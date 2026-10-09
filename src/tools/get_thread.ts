@@ -40,7 +40,7 @@ export async function executeGetThread(
     return "Error: provide either thread_id or contact_address";
   }
 
-  const allMessages = await scanMessages(config, keypair.address, {
+  const { messages: allMessages } = await scanMessages(config, keypair.address, {
     limit: params.limit || 200,
   });
 

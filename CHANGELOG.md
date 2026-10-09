@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **scan_messages no longer skips messages**: the scanner follows `account_tx` markers up to the requested `limit` (bounded to 10 pages) and, when resuming from `since_ledger`, reads oldest-first so a window larger than one page truncates at the newest end. The tool reports `truncated` and, when set, a `next_cursor` that resumes from the highest scanned ledger inclusively; the cursor is derived from all scanned messages rather than only those left after the direction filter. Previously the newest `limit` transactions were taken and `next_cursor = max + 1` permanently skipped any older unread ones.
+
 ## [0.5.1] - 2026-03-02
 
 ### Changed

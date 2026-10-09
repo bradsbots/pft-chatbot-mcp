@@ -27,7 +27,7 @@ export async function executeScanMessages(
   keypair: BotKeypair,
   params: ScanMessagesParams
 ): Promise<string> {
-  const messages = await scanMessages(config, keypair.address, {
+  const { messages, truncated } = await scanMessages(config, keypair.address, {
     sinceLedger: params.since_ledger,
     limit: params.limit,
   });
@@ -60,23 +60,42 @@ export async function executeScanMessages(
       : null,
   }));
 
+  // The cursor is derived from every scanned message (before the direction
+  // filter) so that filtering out, say, outbound messages cannot move the
+  // cursor past unread transactions.
+  const scannedLedgers = messages.map((m) => m.ledgerIndex);
+  const maxLedger = scannedLedgers.length > 0 ? Math.max(...scannedLedgers) : null;
+
   if (results.length === 0) {
+    const nextCursor = truncated && maxLedger != null
+      ? maxLedger
+      : maxLedger != null
+        ? maxLedger + 1
+        : params.since_ledger || null;
     return JSON.stringify({
       messages: [],
       count: 0,
-      next_cursor: params.since_ledger || null,
-      hint: "No new messages found. Call scan_messages again later, or pass a since_ledger to resume from a specific point.",
+      next_cursor: nextCursor,
+      truncated,
+      hint: truncated
+        ? `No ${direction} messages in the first ${messages.length} scanned, but more transactions remain unread. Pass since_ledger=${nextCursor} to continue.`
+        : "No new messages found. Call scan_messages again later, or pass a since_ledger to resume from a specific point.",
     }, null, 2);
   }
 
-  // Compute the cursor: the highest ledger index seen + 1, so the next
-  // scan picks up only new messages (deduplication).
-  const maxLedger = Math.max(...results.map((r) => r.ledger_index));
+  // Compute the cursor. When the window was fully read, the highest ledger
+  // index seen + 1 picks up only new messages next time. When it was
+  // truncated, unread transactions may share that highest ledger, so resume
+  // from it inclusively (callers deduplicate by tx_hash).
+  const nextCursor = truncated ? (maxLedger as number) : (maxLedger as number) + 1;
 
   return JSON.stringify({
     messages: results,
     count: results.length,
-    next_cursor: maxLedger + 1,
-    hint: `Found ${results.length} message(s). Pass since_ledger=${maxLedger + 1} on your next scan_messages call to get only new messages.`,
+    next_cursor: nextCursor,
+    truncated,
+    hint: truncated
+      ? `Found ${results.length} message(s) but the window held more transactions than were scanned. Pass since_ledger=${nextCursor} on your next scan_messages call to continue (deduplicate by tx_hash).`
+      : `Found ${results.length} message(s). Pass since_ledger=${nextCursor} on your next scan_messages call to get only new messages.`,
   }, null, 2);
 }
