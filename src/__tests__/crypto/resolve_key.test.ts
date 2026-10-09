@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ECDSA, Wallet } from "xrpl";
 import sodium from "../../crypto/sodium.js";
 import { resolveRecipientKey } from "../../crypto/resolve_key.js";
+import { signingKeyBelongsTo } from "../../chain/scanner.js";
 
 const RPC = "http://rpc.test/";
-const RECIPIENT = "rRecipientAddress";
+// A real Ed25519 wallet so SigningPubKey -> address derivation is exercised
+// for real; the recipient address is the wallet's own classic address.
+const RECIPIENT_WALLET = Wallet.generate(ECDSA.ed25519);
+const RECIPIENT = RECIPIENT_WALLET.classicAddress;
+const RECIPIENT_SIGNING_PUBKEY = RECIPIENT_WALLET.publicKey; // "ED" + 64 hex
 
 type Handler = (method: string, params: any) => any;
 
@@ -52,9 +58,10 @@ describe("resolveRecipientKey", () => {
 
   it("derives the X25519 key from the Ed25519 SigningPubKey of the recipient's latest signed transaction", async () => {
     await sodium.ready;
-    const signer = sodium.crypto_sign_keypair();
-    const signingPubKey = "ED" + Buffer.from(signer.publicKey).toString("hex").toUpperCase();
-    const expected = sodium.crypto_sign_ed25519_pk_to_curve25519(signer.publicKey);
+    const signingPubKey = RECIPIENT_SIGNING_PUBKEY;
+    const expected = sodium.crypto_sign_ed25519_pk_to_curve25519(
+      Buffer.from(signingPubKey.slice(2), "hex")
+    );
     const { calls } = mockRpc((method, params) => {
       if (method === "account_info") return accountInfo({ RegularKey: "rSomeRegularKeyAddress" });
       if (method === "account_tx") {
@@ -81,16 +88,54 @@ describe("resolveRecipientKey", () => {
       if (method === "account_tx") return { transactions: [] };
       throw new Error(`unexpected ${method}`);
     });
-    await expect(resolveRecipientKey(RPC, RECIPIENT)).rejects.toThrow(/no signed transaction/);
+    await expect(resolveRecipientKey(RPC, RECIPIENT)).rejects.toThrow(/no transaction signed with its master key/);
   });
 
   it("explains a secp256k1 signer precisely", async () => {
+    const secp = Wallet.generate(ECDSA.secp256k1);
     mockRpc((method) => {
       if (method === "account_info") return accountInfo();
-      if (method === "account_tx") return { transactions: [signedTx(RECIPIENT, "02" + "ab".repeat(32))] };
+      if (method === "account_tx") return { transactions: [signedTx(secp.classicAddress, secp.publicKey)] };
       throw new Error(`unexpected ${method}`);
     });
-    await expect(resolveRecipientKey(RPC, RECIPIENT)).rejects.toThrow(/secp256k1/);
+    await expect(resolveRecipientKey(RPC, secp.classicAddress)).rejects.toThrow(/secp256k1/);
+  });
+
+  it("skips RegularKey-signed transactions and uses the master key", async () => {
+    await sodium.ready;
+    const regular = Wallet.generate(ECDSA.ed25519); // the delegated signer's key
+    const expected = sodium.crypto_sign_ed25519_pk_to_curve25519(
+      Buffer.from(RECIPIENT_SIGNING_PUBKEY.slice(2), "hex")
+    );
+    const { calls } = mockRpc((method) => {
+      if (method === "account_info") return accountInfo({ RegularKey: regular.classicAddress });
+      if (method === "account_tx")
+        return {
+          transactions: [
+            // Newest: signed via the RegularKey; its SigningPubKey derives to the regular key's address.
+            signedTx(RECIPIENT, regular.publicKey),
+            // Older: signed with the master key.
+            signedTx(RECIPIENT, RECIPIENT_SIGNING_PUBKEY),
+          ],
+        };
+      throw new Error(`unexpected ${method}`);
+    });
+    const resolved = await resolveRecipientKey(RPC, RECIPIENT);
+    expect(Buffer.from(resolved)).toEqual(Buffer.from(expected));
+    expect(calls).toEqual(["account_info", "account_tx"]);
+    expect(signingKeyBelongsTo(regular.publicKey, RECIPIENT)).toBe(false);
+    expect(signingKeyBelongsTo(RECIPIENT_SIGNING_PUBKEY, RECIPIENT)).toBe(true);
+  });
+
+  it("treats an account with only RegularKey-signed or multi-signed transactions as having no master-signed one", async () => {
+    const regular = Wallet.generate(ECDSA.ed25519);
+    mockRpc((method) => {
+      if (method === "account_info") return accountInfo({ RegularKey: regular.classicAddress });
+      if (method === "account_tx")
+        return { transactions: [signedTx(RECIPIENT, regular.publicKey), signedTx(RECIPIENT, "")] }; // "" = multi-signed
+      throw new Error(`unexpected ${method}`);
+    });
+    await expect(resolveRecipientKey(RPC, RECIPIENT)).rejects.toThrow(/no transaction signed with its master key/);
   });
 
   it("explains an account with no signed transaction precisely", async () => {
@@ -99,14 +144,15 @@ describe("resolveRecipientKey", () => {
       if (method === "account_tx") return { transactions: [signedTx("rSomeoneElse", "ED" + "11".repeat(32))] };
       throw new Error(`unexpected ${method}`);
     });
-    await expect(resolveRecipientKey(RPC, RECIPIENT)).rejects.toThrow(/no signed transaction in its recent history/);
+    await expect(resolveRecipientKey(RPC, RECIPIENT)).rejects.toThrow(/no transaction signed with its master key/);
   });
 
   it("skips unvalidated transactions when looking for the signing key", async () => {
     await sodium.ready;
-    const signer = sodium.crypto_sign_keypair();
-    const signingPubKey = "ED" + Buffer.from(signer.publicKey).toString("hex").toUpperCase();
-    const expected = sodium.crypto_sign_ed25519_pk_to_curve25519(signer.publicKey);
+    const signingPubKey = RECIPIENT_SIGNING_PUBKEY;
+    const expected = sodium.crypto_sign_ed25519_pk_to_curve25519(
+      Buffer.from(signingPubKey.slice(2), "hex")
+    );
     mockRpc((method) => {
       if (method === "account_info") return accountInfo();
       if (method === "account_tx")

@@ -1,3 +1,4 @@
+import { deriveAddress } from "xrpl";
 import type { Config } from "../config.js";
 import {
   identifyMemoType,
@@ -250,10 +251,16 @@ export async function getAccountInfo(
 const SIGNING_KEY_LOOKBACK = 50;
 
 /**
- * The SigningPubKey of the most recent validated transaction this account
- * signed itself (hex, 33 bytes: `ED` + 32 for Ed25519, `02`/`03` + 32 for
- * secp256k1), or null if none is found in the last few transactions. This is
- * the only place on the ledger where an account's signing key is visible.
+ * The master SigningPubKey of this account, read from the most recent
+ * validated transaction the account signed with it (hex, 33 bytes: `ED` + 32
+ * for Ed25519, `02`/`03` + 32 for secp256k1), or null if none is found in the
+ * last few transactions. This is the only place on the ledger where an
+ * account's signing key is visible.
+ *
+ * Only keys that derive to the account's own address are accepted: a
+ * transaction signed through a RegularKey carries the *delegated* key's
+ * SigningPubKey, and a multi-signed transaction carries an empty one; neither
+ * is the account's master key, so both are skipped.
  */
 export async function fetchLatestSigningPubKey(
   rpcUrl: string,
@@ -279,11 +286,20 @@ export async function fetchLatestSigningPubKey(
     if (!tx || tx.Account !== address) continue;
     if (entry.validated === false) continue;
     const key = tx.SigningPubKey;
-    if (typeof key === "string" && /^[0-9a-fA-F]{66}$/.test(key)) {
-      return key;
-    }
+    if (typeof key !== "string" || !/^[0-9a-fA-F]{66}$/.test(key)) continue;
+    if (!signingKeyBelongsTo(key, address)) continue; // RegularKey-signed: not the master key
+    return key;
   }
   return null;
+}
+
+/** True when `signingPubKey` is the master key of `address` (derives to it). */
+export function signingKeyBelongsTo(signingPubKey: string, address: string): boolean {
+  try {
+    return deriveAddress(signingPubKey.toUpperCase()) === address;
+  } catch {
+    return false;
+  }
 }
 
 /** A single trust line returned by account_lines */

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Recipient key derivation actually works**: `resolveRecipientKey`'s documented fallback (derive the X25519 key from the recipient's Ed25519 `SigningPubKey` when no `MessageKey` is set) could never fire: `account_info` carries no signing key and `RegularKey` is an address, so every unregistered recipient failed with a misleading "SigningPubKey could not be converted". The signing key is now read from the recipient's most recent signed transaction (`account_tx`), Ed25519 keys are converted, and a secp256k1 signer or an account with no signed transaction fails with a precise reason. `getAccountInfo` no longer exposes a fake `publicKey`; it returns `regularKey` (an address) alongside `balance` and `messageKey`.
+- **Recipient key derivation actually works**: `resolveRecipientKey`'s documented fallback (derive the X25519 key from the recipient's Ed25519 `SigningPubKey` when no `MessageKey` is set) could never fire: `account_info` carries no signing key and `RegularKey` is an address, so every unregistered recipient failed with a misleading "SigningPubKey could not be converted". The signing key is now read from the recipient's most recent transaction signed with its **master** key (`account_tx`; a `SigningPubKey` is accepted only when it derives to the recipient's own address, so RegularKey-signed and multi-signed transactions are skipped), Ed25519 keys are converted, and a secp256k1 signer or an account with no master-signed transaction fails with a precise reason. `getAccountInfo` no longer exposes a fake `publicKey`; it returns `regularKey` (an address) alongside `balance` and `messageKey`.
 
 ## [0.5.1] - 2026-03-02
 

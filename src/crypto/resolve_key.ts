@@ -29,9 +29,12 @@ function assertKeyLength(key: Uint8Array, source: string, address: string): void
  *      account signed, converted to X25519.
  *
  * `account_info` itself carries no signing key (and `RegularKey` is an
- * address), so the second path reads `account_tx`. A secp256k1 signing key
- * cannot be converted; that case and an account with no signed transaction
- * each fail with a precise reason instead of a generic one.
+ * address), so the second path reads `account_tx`, taking only a
+ * `SigningPubKey` that derives to the recipient's own address (a
+ * RegularKey-signed transaction carries the delegated key, whose X25519
+ * counterpart the recipient's wallet seed cannot produce). A secp256k1
+ * signing key cannot be converted; that case and an account with no
+ * master-signed transaction each fail with a precise reason.
  */
 export async function resolveRecipientKey(
   rpcUrl: string,
@@ -52,7 +55,8 @@ export async function resolveRecipientKey(
   if (signingKey == null) {
     throw new Error(
       `Cannot resolve encryption key for ${recipientAddress}: the account has no ` +
-        `MessageKey set and no signed transaction in its recent history to derive a key from. ` +
+        `MessageKey set and no transaction signed with its master key in its recent history ` +
+        `to derive a key from (RegularKey-signed and multi-signed transactions do not count). ` +
         `Ask the recipient to register (set a MessageKey) first.`
     );
   }
