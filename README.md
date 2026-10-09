@@ -229,7 +229,7 @@ Each attachment object:
 | `size_bytes` | `number` | **Yes** | Original file size in bytes (from upload_content response) |
 | `encrypted` | `boolean` | No | True if attachment content is encrypted (uploaded with encrypt_for) |
 
-**Returns**: JSON with `tx_hash`, `cid`, `thread_id`, `recipient`, `amount_pft`, `amount_drops`, `result`.
+**Returns**: JSON with `tx_hash`, `status`, `cid`, `thread_id`, `recipient`, `amount_pft`, `amount_drops`, `result`. `status` is `validated` (the ledger result is in `result`), `pending` (submitted but not validated when polling stopped; the payment may still validate, so check `tx_hash` before resending; includes `warning` and `last_ledger_sequence`), `expired` (its `LastLedgerSequence` passed without validation; safe to resend) or `rejected` (refused at submit). Only `pending` is returned without an `error` field for a non-`tesSUCCESS` outcome.
 
 **Example -- sending an image:**
 
@@ -366,7 +366,7 @@ Sends PFT to an address without attaching a message. Lightweight transfer for pa
 
 *At least one of `amount_pft` or `amount_drops` must be provided.
 
-**Returns**: JSON with `tx_hash`, `result`, `recipient`, `amount_pft`, `amount_drops`, `fee_drops`.
+**Returns**: JSON with `tx_hash`, `status`, `result`, `recipient`, `amount_pft`, `amount_drops`, `fee_drops`. `status` is `validated`, `pending` (adds `warning` and `last_ledger_sequence`; do not resend without checking `tx_hash`), `expired` or `rejected`; see `send_message`.
 
 ---
 

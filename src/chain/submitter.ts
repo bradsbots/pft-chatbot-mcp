@@ -76,26 +76,77 @@ async function fetchLedgerInfo(rpcUrl: string, account: string): Promise<LedgerI
 }
 
 /**
- * Submit a signed transaction blob and poll until validated.
+ * Final or provisional state of a submitted transaction.
+ *
+ * - `validated`: included in a validated ledger; `result` is the ledger's
+ *   `meta.TransactionResult` (which may still be a `tec` failure code).
+ * - `expired`: the validated ledger passed the transaction's
+ *   `LastLedgerSequence` without it being validated; it can never be applied
+ *   and may safely be resent with a new sequence.
+ * - `pending`: still in flight when polling stopped. It may yet validate;
+ *   callers must not resend blindly, and should check `txHash` first.
+ * - `rejected`: `submit` returned something other than `tesSUCCESS` or
+ *   `terQUEUED`; `result` is that provisional engine result.
  */
-async function submitAndPoll(
+export type SubmissionStatus = "validated" | "expired" | "pending" | "rejected";
+
+export interface SubmissionOutcome {
+  txHash: string;
+  /** Engine/ledger result code, or a short description for `pending`/`expired`. */
+  result: string;
+  status: SubmissionStatus;
+  /** The transaction's LastLedgerSequence, when known. */
+  lastLedgerSequence?: number;
+  /** The last validated ledger observed while polling, when known. */
+  lastValidatedLedger?: number;
+}
+
+export interface PollOptions {
+  /** Delay between polls in ms (default 2000). */
+  intervalMs?: number;
+  /** Maximum number of polls (default 30). */
+  maxAttempts?: number;
+}
+
+/**
+ * Submit a signed transaction blob and poll until it is validated, expires,
+ * or the polling budget runs out.
+ *
+ * Reliable submission: a transaction that has passed its LastLedgerSequence
+ * without validating is reported as `expired` (final), while one that is
+ * merely still in flight is reported as `pending` (not final). Previously both
+ * came back as a free-text "not yet validated" result that callers treated as
+ * a failure, which invited resending a payment that could still validate.
+ */
+export async function submitAndPoll(
   rpcUrl: string,
   signedTxBlob: string,
-  txHash: string
-): Promise<{ txHash: string; result: string }> {
+  txHash: string,
+  lastLedgerSequence?: number,
+  options: PollOptions = {}
+): Promise<SubmissionOutcome> {
+  const intervalMs = options.intervalMs ?? 2000;
+  const maxAttempts = options.maxAttempts ?? 30;
+
   const submitResult = await rpcCall(rpcUrl, "submit", {
     tx_blob: signedTxBlob,
   });
 
   const engineResult = submitResult.engine_result;
   if (engineResult !== "tesSUCCESS" && engineResult !== "terQUEUED") {
-    return { txHash, result: engineResult || "unknown" };
+    return {
+      txHash,
+      result: engineResult || "unknown",
+      status: "rejected",
+      lastLedgerSequence,
+    };
   }
 
-  // Poll for validation
-  const maxAttempts = 30;
+  let lastValidatedLedger: number | undefined;
   for (let i = 0; i < maxAttempts; i++) {
-    await new Promise((r) => setTimeout(r, 2000));
+    if (intervalMs > 0) {
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
     try {
       const txResult = await rpcCall(rpcUrl, "tx", { transaction: txHash });
       if (txResult.validated) {
@@ -103,16 +154,59 @@ async function submitAndPoll(
         return {
           txHash,
           result: meta.TransactionResult || engineResult || "tesSUCCESS",
+          status: "validated",
+          lastLedgerSequence,
+          lastValidatedLedger: txResult.ledger_index ?? lastValidatedLedger,
         };
       }
     } catch {
-      // tx not found yet, keep polling
+      // tx not found yet (or transient RPC error); keep polling
+    }
+
+    if (lastLedgerSequence != null) {
+      try {
+        const serverInfo = await rpcCall(rpcUrl, "server_info", {});
+        const validatedSeq = serverInfo.info?.validated_ledger?.seq;
+        if (typeof validatedSeq === "number") {
+          lastValidatedLedger = validatedSeq;
+          if (validatedSeq > lastLedgerSequence) {
+            // One last look: the tx may have validated in the final ledgers.
+            try {
+              const txResult = await rpcCall(rpcUrl, "tx", { transaction: txHash });
+              if (txResult.validated) {
+                const meta = txResult.meta || {};
+                return {
+                  txHash,
+                  result: meta.TransactionResult || engineResult || "tesSUCCESS",
+                  status: "validated",
+                  lastLedgerSequence,
+                  lastValidatedLedger: txResult.ledger_index ?? validatedSeq,
+                };
+              }
+            } catch {
+              // still not found: expired below
+            }
+            return {
+              txHash,
+              result: `expired: LastLedgerSequence ${lastLedgerSequence} passed (validated ledger ${validatedSeq}) without validation`,
+              status: "expired",
+              lastLedgerSequence,
+              lastValidatedLedger: validatedSeq,
+            };
+          }
+        }
+      } catch {
+        // server_info unavailable; expiry cannot be decided this round
+      }
     }
   }
 
   return {
     txHash,
-    result: `submitted (${engineResult}) but not yet validated after ${maxAttempts * 2}s`,
+    result: `pending: submitted (${engineResult}) but not yet validated after ${Math.round((maxAttempts * intervalMs) / 1000)}s`,
+    status: "pending",
+    lastLedgerSequence,
+    lastValidatedLedger,
   };
 }
 
@@ -192,9 +286,14 @@ export async function signAndSubmit(
   config: Config,
   wallet: Wallet,
   txJson: any
-): Promise<{ txHash: string; result: string }> {
+): Promise<SubmissionOutcome> {
   const signed = wallet.sign(txJson);
-  return submitAndPoll(config.pftlRpcUrl, signed.tx_blob, signed.hash);
+  return submitAndPoll(
+    config.pftlRpcUrl,
+    signed.tx_blob,
+    signed.hash,
+    typeof txJson.LastLedgerSequence === "number" ? txJson.LastLedgerSequence : undefined
+  );
 }
 
 /**
@@ -205,7 +304,7 @@ export async function publishMessageKey(
   config: Config,
   wallet: Wallet,
   messageKeyHex: string
-): Promise<{ txHash: string; result: string }> {
+): Promise<SubmissionOutcome> {
   const ledger = await fetchLedgerInfo(config.pftlRpcUrl, wallet.address);
 
   const txJson: any = {
@@ -217,7 +316,12 @@ export async function publishMessageKey(
   applyAutofill(txJson, ledger);
 
   const signed = wallet.sign(txJson);
-  return submitAndPoll(config.pftlRpcUrl, signed.tx_blob, signed.hash);
+  return submitAndPoll(
+    config.pftlRpcUrl,
+    signed.tx_blob,
+    signed.hash,
+    txJson.LastLedgerSequence
+  );
 }
 
 /**
