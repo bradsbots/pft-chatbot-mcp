@@ -490,6 +490,7 @@ Most bots should use the default (fully shared) -- it enables server-side messag
 | `KEYSTONE_API_KEY` | Auto | - | Auto-provisioned on first `register_bot` call |
 | `PFTL_RPC_URL` | No | `https://rpc.testnet.postfiat.org` | Chain JSON-RPC endpoint |
 | `PFTL_WSS_URL` | No | `wss://ws.testnet.postfiat.org` | Chain WebSocket endpoint |
+| `IPFS_MAX_FETCH_BYTES` | No | `16777216` | Upper bound on bytes read from a gateway for one CID (16 MiB). Content over the bound is rejected before it is buffered; the error is final, not a gateway fallback. |
 | `IPFS_GATEWAY_URL` | No | `https://ipfs-testnet.postfiat.org` | Primary IPFS gateway for reads |
 | `KEYSTONE_GRPC_URL` | No | `keystone-grpc.postfiat.org:443` | Keystone gRPC service |
 | `PING_INTERVAL_MS` | No | `900000` (15 min) | Ping interval in ms. Set 0 to disable. |

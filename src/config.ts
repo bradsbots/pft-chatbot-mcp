@@ -10,6 +10,8 @@ export interface Config {
   pftlWssUrl: string;
   /** Primary IPFS gateway for reads (falls back to public gateways) */
   ipfsGatewayUrl: string;
+  /** Upper bound on bytes read from a gateway for one CID (default 16 MiB; the gateway falls back to the default when absent) */
+  ipfsMaxFetchBytes?: number;
   /** Keystone gRPC service URL */
   keystoneGrpcUrl: string;
   /** Keystone API key (auto-provisioned on first register_bot call) */
@@ -98,6 +100,20 @@ function loadTasknodeKey(): { key: Uint8Array | null; source: string | null } {
   return { key: new Uint8Array(decoded), source };
 }
 
+export const DEFAULT_IPFS_MAX_FETCH_BYTES = 16 * 1024 * 1024;
+
+function parseIpfsMaxFetchBytes(envVal: string | undefined): number {
+  if (!envVal) return DEFAULT_IPFS_MAX_FETCH_BYTES;
+  const parsed = parseInt(envVal, 10);
+  if (isNaN(parsed) || parsed <= 0) {
+    process.stderr.write(
+      `[config] WARN – Invalid IPFS_MAX_FETCH_BYTES="${envVal}", using default ${DEFAULT_IPFS_MAX_FETCH_BYTES}\n`
+    );
+    return DEFAULT_IPFS_MAX_FETCH_BYTES;
+  }
+  return parsed;
+}
+
 function parsePingInterval(envVal: string | undefined): number {
   if (!envVal) return 900_000;
   const parsed = parseInt(envVal, 10);
@@ -128,6 +144,7 @@ export function loadConfig(): Config {
     ipfsGatewayUrl:
       process.env.IPFS_GATEWAY_URL ||
       "https://ipfs-testnet.postfiat.org",
+    ipfsMaxFetchBytes: parseIpfsMaxFetchBytes(process.env.IPFS_MAX_FETCH_BYTES),
     keystoneGrpcUrl:
       process.env.KEYSTONE_GRPC_URL || "keystone-grpc.postfiat.org:443",
     keystoneApiKey,

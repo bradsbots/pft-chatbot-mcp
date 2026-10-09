@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Bounded IPFS reads**: `fetchIpfsBytes` / `fetchIpfsJson` buffered whatever a gateway returned (`arrayBuffer()` / `json()` with no size check), so one oversized or hostile CID referenced from a message could make `get_attachment` / `get_message` allocate an unbounded body and hand a base64 copy to the MCP client. Reads are now bounded by `IPFS_MAX_FETCH_BYTES` (default 16 MiB): a declared `Content-Length` over the bound is rejected before any body byte is read, and the body is otherwise streamed and aborted the moment the bound is exceeded. The rejection (`IpfsContentTooLargeError`) is final and does not fall back to the next gateway.
+
 ## [0.5.1] - 2026-03-02
 
 ### Changed

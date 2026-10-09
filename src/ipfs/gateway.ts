@@ -1,4 +1,4 @@
-import type { Config } from "../config.js";
+import { DEFAULT_IPFS_MAX_FETCH_BYTES, type Config } from "../config.js";
 
 // Public IPFS gateways for fallback reads
 const FALLBACK_GATEWAYS = [
@@ -56,15 +56,83 @@ async function fetchWithTimeout(
 }
 
 /**
- * Fetch JSON content from IPFS by CID, trying multiple gateways.
- * This is the same pattern used by the pftasks frontend.
+ * Thrown when a CID's content exceeds the configured fetch bound. It is a
+ * property of the content, not of the gateway that served it, so callers do
+ * not fall back to another gateway for it.
  */
-export async function fetchIpfsJson(
-  config: Config,
-  cidOrUri: string
-): Promise<any> {
+export class IpfsContentTooLargeError extends Error {
+  constructor(
+    public readonly cid: string,
+    public readonly maxBytes: number,
+    public readonly observedBytes: number | null
+  ) {
+    super(
+      observedBytes == null
+        ? `Content for CID ${cid} exceeds the ${maxBytes}-byte fetch bound`
+        : `Content for CID ${cid} is ${observedBytes} bytes, over the ${maxBytes}-byte fetch bound`
+    );
+    this.name = "IpfsContentTooLargeError";
+  }
+}
+
+function maxFetchBytes(config: Config): number {
+  const value = config.ipfsMaxFetchBytes;
+  return typeof value === "number" && value > 0 ? value : DEFAULT_IPFS_MAX_FETCH_BYTES;
+}
+
+/**
+ * Read a response body with a hard byte bound. A declared Content-Length
+ * above the bound is rejected before any body bytes are read; otherwise the
+ * body is consumed as a stream and the read is aborted as soon as the bound
+ * is exceeded, so a gateway that lies about (or omits) Content-Length cannot
+ * make the process buffer an unbounded body.
+ */
+async function readBodyBounded(
+  response: Response,
+  cid: string,
+  maxBytes: number
+): Promise<Buffer> {
+  const declared = response.headers.get("content-length");
+  if (declared != null) {
+    const length = Number(declared);
+    if (Number.isFinite(length) && length > maxBytes) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new IpfsContentTooLargeError(cid, maxBytes, length);
+    }
+  }
+  if (!response.body) {
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > maxBytes) {
+      throw new IpfsContentTooLargeError(cid, maxBytes, buffer.length);
+    }
+    return buffer;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          throw new IpfsContentTooLargeError(cid, maxBytes, null);
+        }
+        chunks.push(value);
+      }
+    }
+  } catch (err) {
+    await reader.cancel().catch(() => undefined);
+    throw err;
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)), total);
+}
+
+async function fetchBoundedFromGateways(config: Config, cidOrUri: string): Promise<Buffer> {
   const cid = extractCid(cidOrUri);
   const urls = buildGatewayUrls(config, cid);
+  const bound = maxFetchBytes(config);
   const errors: string[] = [];
 
   for (const url of urls) {
@@ -74,8 +142,12 @@ export async function fetchIpfsJson(
         errors.push(`${url}: ${response.status}`);
         continue;
       }
-      return await response.json();
+      return await readBodyBounded(response, cid, bound);
     } catch (err: any) {
+      if (err instanceof IpfsContentTooLargeError) {
+        // Final: the content itself is over the bound.
+        throw err;
+      }
       errors.push(`${url}: ${err.message}`);
       continue;
     }
@@ -87,32 +159,23 @@ export async function fetchIpfsJson(
 }
 
 /**
+ * Fetch JSON content from IPFS by CID, trying multiple gateways.
+ * This is the same pattern used by the pftasks frontend.
+ */
+export async function fetchIpfsJson(
+  config: Config,
+  cidOrUri: string
+): Promise<any> {
+  const bytes = await fetchBoundedFromGateways(config, cidOrUri);
+  return JSON.parse(bytes.toString("utf8"));
+}
+
+/**
  * Fetch raw bytes from IPFS by CID, trying multiple gateways.
  */
 export async function fetchIpfsBytes(
   config: Config,
   cidOrUri: string
 ): Promise<Buffer> {
-  const cid = extractCid(cidOrUri);
-  const urls = buildGatewayUrls(config, cid);
-  const errors: string[] = [];
-
-  for (const url of urls) {
-    try {
-      const response = await fetchWithTimeout(url, FETCH_TIMEOUT_MS);
-      if (!response.ok) {
-        errors.push(`${url}: ${response.status}`);
-        continue;
-      }
-      const arrayBuf = await response.arrayBuffer();
-      return Buffer.from(arrayBuf);
-    } catch (err: any) {
-      errors.push(`${url}: ${err.message}`);
-      continue;
-    }
-  }
-
-  throw new Error(
-    `Failed to fetch CID ${cid} from all gateways:\n${errors.join("\n")}`
-  );
+  return fetchBoundedFromGateways(config, cidOrUri);
 }
