@@ -207,15 +207,20 @@ export async function scanMessages(
 
 /**
  * Fetch account_info for a wallet address.
- * Returns the public key and balance.
+ * Returns the balance, the MessageKey (if set) and the RegularKey.
+ *
+ * Note: `account_data` carries no signing public key. `RegularKey` is an
+ * account *address* authorized to sign for this account, not a key, so it
+ * cannot be used to derive an encryption key. Use
+ * `fetchLatestSigningPubKey` for the key the account actually signs with.
  */
 export async function getAccountInfo(
   rpcUrl: string,
   address: string
 ): Promise<{
-  publicKey: string;
   balance: string;
   messageKey?: string;
+  regularKey?: string;
 }> {
   const response = await fetch(rpcUrl, {
     method: "POST",
@@ -235,10 +240,50 @@ export async function getAccountInfo(
 
   const data = json.result?.account_data;
   return {
-    publicKey: data?.RegularKey || data?.SigningPubKey || "",
     balance: data?.Balance || "0",
     messageKey: data?.MessageKey,
+    regularKey: data?.RegularKey,
   };
+}
+
+/** How many recent transactions to inspect for the account's signing key. */
+const SIGNING_KEY_LOOKBACK = 50;
+
+/**
+ * The SigningPubKey of the most recent validated transaction this account
+ * signed itself (hex, 33 bytes: `ED` + 32 for Ed25519, `02`/`03` + 32 for
+ * secp256k1), or null if none is found in the last few transactions. This is
+ * the only place on the ledger where an account's signing key is visible.
+ */
+export async function fetchLatestSigningPubKey(
+  rpcUrl: string,
+  address: string
+): Promise<string | null> {
+  const response = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      method: "account_tx",
+      params: [{ account: address, limit: SIGNING_KEY_LOOKBACK, forward: false }],
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`account_tx failed: ${response.status} ${response.statusText}`);
+  }
+  const json = (await response.json()) as any;
+  if (json.result?.error) {
+    throw new Error(`account_tx error: ${json.result.error_message || json.result.error}`);
+  }
+  for (const entry of json.result?.transactions || []) {
+    const tx = entry.tx || entry.tx_json;
+    if (!tx || tx.Account !== address) continue;
+    if (entry.validated === false) continue;
+    const key = tx.SigningPubKey;
+    if (typeof key === "string" && /^[0-9a-fA-F]{66}$/.test(key)) {
+      return key;
+    }
+  }
+  return null;
 }
 
 /** A single trust line returned by account_lines */

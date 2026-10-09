@@ -1,7 +1,8 @@
 import sodium from "./sodium.js";
-import { getAccountInfo } from "../chain/scanner.js";
+import { fetchLatestSigningPubKey, getAccountInfo } from "../chain/scanner.js";
 
 const X25519_KEY_LENGTH = 32;
+const ED25519_PREFIX = "ED";
 
 function stripEdPrefix(hex: string): string {
   if (hex.length === 66 && hex.toUpperCase().startsWith("ED")) {
@@ -21,8 +22,16 @@ function assertKeyLength(key: Uint8Array, source: string, address: string): void
 
 /**
  * Resolve the recipient's X25519 public key for encryption.
- * Tries: 1) MessageKey from chain, 2) derive from SigningPubKey.
- * Validates that the resulting key is exactly 32 bytes.
+ *
+ * Tries, in order:
+ *   1. the account's on-chain `MessageKey` (set by `register_bot`);
+ *   2. the Ed25519 `SigningPubKey` from the most recent transaction the
+ *      account signed, converted to X25519.
+ *
+ * `account_info` itself carries no signing key (and `RegularKey` is an
+ * address), so the second path reads `account_tx`. A secp256k1 signing key
+ * cannot be converted; that case and an account with no signed transaction
+ * each fail with a precise reason instead of a generic one.
  */
 export async function resolveRecipientKey(
   rpcUrl: string,
@@ -39,18 +48,24 @@ export async function resolveRecipientKey(
     return key;
   }
 
-  if (info.publicKey && info.publicKey.length >= 64) {
-    const pubkeyHex = stripEdPrefix(info.publicKey);
-    const ed25519Pubkey = Buffer.from(pubkeyHex, "hex");
-    if (ed25519Pubkey.length === 32) {
-      const curve25519Key = sodium.crypto_sign_ed25519_pk_to_curve25519(ed25519Pubkey);
-      assertKeyLength(curve25519Key, "derived X25519 key", recipientAddress);
-      return curve25519Key;
-    }
+  const signingKey = await fetchLatestSigningPubKey(rpcUrl, recipientAddress);
+  if (signingKey == null) {
+    throw new Error(
+      `Cannot resolve encryption key for ${recipientAddress}: the account has no ` +
+        `MessageKey set and no signed transaction in its recent history to derive a key from. ` +
+        `Ask the recipient to register (set a MessageKey) first.`
+    );
   }
-
-  throw new Error(
-    `Cannot resolve encryption key for ${recipientAddress}. ` +
-      `The recipient has no MessageKey set and the SigningPubKey could not be converted.`
-  );
+  if (!signingKey.toUpperCase().startsWith(ED25519_PREFIX)) {
+    throw new Error(
+      `Cannot resolve encryption key for ${recipientAddress}: the account has no ` +
+        `MessageKey set and signs with a secp256k1 key, which cannot be converted to X25519. ` +
+        `Ask the recipient to register (set a MessageKey) first.`
+    );
+  }
+  const ed25519Pubkey = Buffer.from(stripEdPrefix(signingKey), "hex");
+  assertKeyLength(ed25519Pubkey, "SigningPubKey", recipientAddress);
+  const curve25519Key = sodium.crypto_sign_ed25519_pk_to_curve25519(ed25519Pubkey);
+  assertKeyLength(curve25519Key, "derived X25519 key", recipientAddress);
+  return curve25519Key;
 }
