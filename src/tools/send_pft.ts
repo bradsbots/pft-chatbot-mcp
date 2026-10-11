@@ -33,24 +33,36 @@ export async function executeSendPft(
     throw new Error("Either amount_pft or amount_drops must be provided.");
   }
 
-  // Determine PFT amount in drops
+  // Determine PFT amount in drops. Only a complete decimal token is accepted
+  // (surrounding whitespace is trimmed): amount_pft must match
+  // /^\d+(\.\d{1,6})?$/ (6 decimals = drop precision) and amount_drops must
+  // match /^\d+$/. Exponents, signs, hex, suffixes, NaN/Infinity and extra
+  // decimals are refused instead of being silently reinterpreted by
+  // parseFloat/parseInt. Conversion uses exact BigInt arithmetic, and the
+  // result must be between 1 drop and MAX_DROPS. MAX_DROPS is the XRPL
+  // maximum (100,000,000,000 PFT = 1e17 drops), assumed to apply to PFTL.
+  const MAX_DROPS = 100_000_000_000_000_000n;
   let amountDrops: string;
   if (params.amount_pft) {
-    const pftValue = parseFloat(params.amount_pft);
-    if (isNaN(pftValue) || pftValue <= 0) {
+    const match = /^(\d+)(?:\.(\d{1,6}))?$/.exec(params.amount_pft.trim());
+    const drops = match
+      ? BigInt(match[1]) * 1_000_000n + BigInt((match[2] ?? "").padEnd(6, "0"))
+      : 0n;
+    if (!match || drops < 1n || drops > MAX_DROPS) {
       throw new Error(
-        `Invalid amount_pft: "${params.amount_pft}". Must be a positive number.`
+        `Invalid amount_pft: "${params.amount_pft}". Must be a positive decimal PFT amount (digits, optional "." and at most 6 decimals; no exponent, sign or suffix) between 0.000001 and 100000000000.`
       );
     }
-    amountDrops = Math.round(pftValue * 1_000_000).toString();
+    amountDrops = drops.toString();
   } else {
-    const dropsValue = parseInt(params.amount_drops!, 10);
-    if (isNaN(dropsValue) || dropsValue <= 0) {
+    const match = /^\d+$/.exec(params.amount_drops!.trim());
+    const drops = match ? BigInt(match[0]) : 0n;
+    if (!match || drops < 1n || drops > MAX_DROPS) {
       throw new Error(
-        `Invalid amount_drops: "${params.amount_drops}". Must be a positive integer.`
+        `Invalid amount_drops: "${params.amount_drops}". Must be a positive integer of digits only (no exponent, sign, decimal point or suffix) between 1 and 100000000000000000.`
       );
     }
-    amountDrops = dropsValue.toString();
+    amountDrops = drops.toString();
   }
 
   // Prepare payment (no memo)
