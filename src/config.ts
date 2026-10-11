@@ -102,10 +102,19 @@ function loadTasknodeKey(): { key: Uint8Array | null; source: string | null } {
 
 export const DEFAULT_IPFS_MAX_FETCH_BYTES = 16 * 1024 * 1024;
 
+/**
+ * The fetch bound must be a complete decimal token that is a safe integer
+ * of at least one byte. `parseInt` would read a numeric prefix ("1e6" -> 1,
+ * "16M" -> 16) and turns a 400-digit value into `Infinity`, which the
+ * gateway bound check would then accept as "a number greater than zero" and
+ * every body length would compare below it, restoring the unbounded read.
+ * Anything else warns on stderr and keeps the default.
+ */
 function parseIpfsMaxFetchBytes(envVal: string | undefined): number {
-  if (!envVal) return DEFAULT_IPFS_MAX_FETCH_BYTES;
-  const parsed = parseInt(envVal, 10);
-  if (isNaN(parsed) || parsed <= 0) {
+  if (envVal === undefined || envVal.trim() === "") return DEFAULT_IPFS_MAX_FETCH_BYTES;
+  const token = envVal.trim();
+  const parsed = /^\d+$/.test(token) ? Number(token) : NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
     process.stderr.write(
       `[config] WARN – Invalid IPFS_MAX_FETCH_BYTES="${envVal}", using default ${DEFAULT_IPFS_MAX_FETCH_BYTES}\n`
     );

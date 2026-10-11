@@ -56,6 +56,21 @@ describe("bounded IPFS reads", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it.each([Infinity, NaN, 1.5, -1, 0])(
+    "keeps a usable bound when the configured bound is %s",
+    async (bound) => {
+      // 17 MiB declared: over the 16 MiB default, so a usable bound must reject it.
+      const { response, wasCancelled } = streamed([new Uint8Array(10)], {
+        "content-length": String(17 * 1024 * 1024),
+      });
+      vi.stubGlobal("fetch", vi.fn(async () => response));
+      await expect(fetchIpfsBytes(config(bound), "bafy-unbounded")).rejects.toBeInstanceOf(
+        IpfsContentTooLargeError
+      );
+      expect(wasCancelled()).toBe(true);
+    }
+  );
+
   it("accepts a body exactly at the bound", async () => {
     const { response } = streamed([new Uint8Array(100)]);
     vi.stubGlobal("fetch", vi.fn(async () => response));

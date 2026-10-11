@@ -77,7 +77,11 @@ export class IpfsContentTooLargeError extends Error {
 
 function maxFetchBytes(config: Config): number {
   const value = config.ipfsMaxFetchBytes;
-  return typeof value === "number" && value > 0 ? value : DEFAULT_IPFS_MAX_FETCH_BYTES;
+  // A non-finite or non-integer bound (Infinity, NaN) would let every body
+  // length compare below it; only a positive safe integer is a usable bound.
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : DEFAULT_IPFS_MAX_FETCH_BYTES;
 }
 
 /**
