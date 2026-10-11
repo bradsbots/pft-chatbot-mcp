@@ -78,6 +78,53 @@ describe("bounded IPFS reads", () => {
     expect(calls).toHaveLength(2);
   });
 
+  it("falls back to the next gateway when one answers 200 with malformed JSON", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        calls.push(url);
+        if (calls.length === 1) return streamed([new TextEncoder().encode("{not-json")]).response;
+        return streamed([new TextEncoder().encode('{"ok":true}')]).response;
+      })
+    );
+    const json = await fetchIpfsJson(config(1024), "bafy-json-fallback");
+    expect(json).toEqual({ ok: true });
+    expect(calls).toHaveLength(2);
+  });
+
+  it("reports the parse failure of every gateway when none returns usable JSON", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        calls.push(url);
+        return streamed([new TextEncoder().encode("{not-json")]).response;
+      })
+    );
+    const failure = await fetchIpfsJson(config(1024), "bafy-json-broken").catch((e) => e);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(IpfsContentTooLargeError);
+    expect(failure.message).toContain("Failed to fetch CID bafy-json-broken from all gateways");
+    // One line per gateway, each carrying the JSON.parse message.
+    expect(calls).toHaveLength(4);
+    expect(failure.message.split("\n").slice(1)).toHaveLength(4);
+  });
+
+  it("keeps an over-bound JSON body final even when a later gateway would parse", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        calls.push(url);
+        if (calls.length === 1) return streamed([new TextEncoder().encode("[" + "1,".repeat(200) + "1]")]).response;
+        return streamed([new TextEncoder().encode('{"ok":true}')]).response;
+      })
+    );
+    await expect(fetchIpfsJson(config(50), "bafy-json-big-first")).rejects.toBeInstanceOf(IpfsContentTooLargeError);
+    expect(calls).toHaveLength(1);
+  });
+
   it("bounds JSON reads too", async () => {
     const { response } = streamed([new TextEncoder().encode("[" + "1,".repeat(200) + "1]")]);
     vi.stubGlobal("fetch", vi.fn(async () => response));

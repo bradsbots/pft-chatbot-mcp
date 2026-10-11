@@ -129,7 +129,17 @@ async function readBodyBounded(
   return Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)), total);
 }
 
-async function fetchBoundedFromGateways(config: Config, cidOrUri: string): Promise<Buffer> {
+/**
+ * Try each gateway in order; `decode` runs on the bounded body inside the
+ * per-gateway scope, so a gateway that answers 200 with a body the caller
+ * cannot use (malformed JSON) is treated like any other gateway failure and
+ * the next gateway is tried. Only IpfsContentTooLargeError is final.
+ */
+async function fetchBoundedFromGateways<T>(
+  config: Config,
+  cidOrUri: string,
+  decode: (bytes: Buffer) => T
+): Promise<T> {
   const cid = extractCid(cidOrUri);
   const urls = buildGatewayUrls(config, cid);
   const bound = maxFetchBytes(config);
@@ -142,7 +152,8 @@ async function fetchBoundedFromGateways(config: Config, cidOrUri: string): Promi
         errors.push(`${url}: ${response.status}`);
         continue;
       }
-      return await readBodyBounded(response, cid, bound);
+      const bytes = await readBodyBounded(response, cid, bound);
+      return decode(bytes);
     } catch (err: any) {
       if (err instanceof IpfsContentTooLargeError) {
         // Final: the content itself is over the bound.
@@ -166,8 +177,9 @@ export async function fetchIpfsJson(
   config: Config,
   cidOrUri: string
 ): Promise<any> {
-  const bytes = await fetchBoundedFromGateways(config, cidOrUri);
-  return JSON.parse(bytes.toString("utf8"));
+  return fetchBoundedFromGateways(config, cidOrUri, (bytes) =>
+    JSON.parse(bytes.toString("utf8"))
+  );
 }
 
 /**
@@ -177,5 +189,5 @@ export async function fetchIpfsBytes(
   config: Config,
   cidOrUri: string
 ): Promise<Buffer> {
-  return fetchBoundedFromGateways(config, cidOrUri);
+  return fetchBoundedFromGateways(config, cidOrUri, (bytes) => bytes);
 }
