@@ -135,3 +135,72 @@ describe("loadConfig – IPFS_MAX_FETCH_BYTES", () => {
     expect(warnings.join("")).not.toContain("Invalid");
   });
 });
+
+describe("loadConfig – PING_INTERVAL_MS", () => {
+  const ORIGINAL_ENV = process.env;
+  let warnings: string[];
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    process.env = { ...ORIGINAL_ENV, BOT_SEED: "test-seed-for-config-tests" };
+    delete process.env.PING_INTERVAL_MS;
+    warnings = [];
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+      warnings.push(String(chunk));
+      return true;
+    }) as never);
+  });
+
+  afterEach(() => {
+    stderrSpy.mockRestore();
+    process.env = ORIGINAL_ENV;
+  });
+
+  let importSerial = 0;
+  async function freshLoadConfig() {
+    const mod = await import("../config.js?t=" + Date.now() + String(importSerial++));
+    return mod.loadConfig();
+  }
+
+  // parseInt would read a numeric prefix from each of these ("5e3" -> 5 ms,
+  // "15m" -> 15 ms, "0.5" -> 0 = pinging off); they must warn and keep the
+  // default instead.
+  it.each(["5e3", "15m", "0.5", "900000ms", "abc", "-1", "1_000"])(
+    "warns and keeps the default ping interval for PING_INTERVAL_MS=%s",
+    async (value) => {
+      process.env.PING_INTERVAL_MS = value;
+      const config = await freshLoadConfig();
+      expect(config.pingIntervalMs).toBe(900_000);
+      expect(warnings.join("")).toContain(`Invalid PING_INTERVAL_MS="${value}"`);
+    }
+  );
+
+  it("keeps the default for a 400-digit value", async () => {
+    process.env.PING_INTERVAL_MS = "9".repeat(400);
+    const config = await freshLoadConfig();
+    expect(Number.isSafeInteger(config.pingIntervalMs)).toBe(true);
+    expect(config.pingIntervalMs).toBe(900_000);
+    expect(warnings.join("")).toContain("Invalid PING_INTERVAL_MS=");
+  });
+
+  it("accepts whole-token digits, padding and a zero interval", async () => {
+    process.env.PING_INTERVAL_MS = " 60000 ";
+    let config = await freshLoadConfig();
+    expect(config.pingIntervalMs).toBe(60_000);
+
+    process.env.PING_INTERVAL_MS = "0";
+    config = await freshLoadConfig();
+    expect(config.pingIntervalMs).toBe(0);
+    expect(warnings.join("")).not.toContain("Invalid");
+  });
+
+  it("uses the default when unset or empty", async () => {
+    let config = await freshLoadConfig();
+    expect(config.pingIntervalMs).toBe(900_000);
+
+    process.env.PING_INTERVAL_MS = "";
+    config = await freshLoadConfig();
+    expect(config.pingIntervalMs).toBe(900_000);
+    expect(warnings.join("")).not.toContain("Invalid");
+  });
+});

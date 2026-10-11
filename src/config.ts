@@ -101,38 +101,39 @@ function loadTasknodeKey(): { key: Uint8Array | null; source: string | null } {
 }
 
 export const DEFAULT_IPFS_MAX_FETCH_BYTES = 16 * 1024 * 1024;
+export const DEFAULT_PING_INTERVAL_MS = 900_000;
 
 /**
- * The fetch bound must be a complete decimal token that is a safe integer
- * of at least one byte. `parseInt` would read a numeric prefix ("1e6" -> 1,
- * "16M" -> 16) and turns a 400-digit value into `Infinity`, which the
- * gateway bound check would then accept as "a number greater than zero" and
- * every body length would compare below it, restoring the unbounded read.
- * Anything else warns on stderr and keeps the default.
+ * Parse an integer env setting from its whole trimmed token. parseInt reads
+ * only a numeric prefix ("5e3" -> 5, "15m" -> 15, "0.5" -> 0), which would
+ * silently turn a mis-typed value into a tiny interval or bound instead of
+ * the documented warn-and-default. Anything other than a run of decimal
+ * digits at or above `minimum` warns on stderr and falls back, as before.
  */
-function parseIpfsMaxFetchBytes(envVal: string | undefined): number {
-  if (envVal === undefined || envVal.trim() === "") return DEFAULT_IPFS_MAX_FETCH_BYTES;
+function parseIntegerEnv(
+  name: string,
+  envVal: string | undefined,
+  fallback: number,
+  minimum: number
+): number {
+  if (envVal === undefined || envVal.trim() === "") return fallback;
   const token = envVal.trim();
   const parsed = /^\d+$/.test(token) ? Number(token) : NaN;
-  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+  if (!Number.isSafeInteger(parsed) || parsed < minimum) {
     process.stderr.write(
-      `[config] WARN – Invalid IPFS_MAX_FETCH_BYTES="${envVal}", using default ${DEFAULT_IPFS_MAX_FETCH_BYTES}\n`
+      `[config] WARN – Invalid ${name}="${envVal}", using default ${fallback}\n`
     );
-    return DEFAULT_IPFS_MAX_FETCH_BYTES;
+    return fallback;
   }
   return parsed;
 }
 
+function parseIpfsMaxFetchBytes(envVal: string | undefined): number {
+  return parseIntegerEnv("IPFS_MAX_FETCH_BYTES", envVal, DEFAULT_IPFS_MAX_FETCH_BYTES, 1);
+}
+
 function parsePingInterval(envVal: string | undefined): number {
-  if (!envVal) return 900_000;
-  const parsed = parseInt(envVal, 10);
-  if (isNaN(parsed) || parsed < 0) {
-    process.stderr.write(
-      `[config] WARN – Invalid PING_INTERVAL_MS="${envVal}", using default 900000ms\n`
-    );
-    return 900_000;
-  }
-  return parsed;
+  return parseIntegerEnv("PING_INTERVAL_MS", envVal, DEFAULT_PING_INTERVAL_MS, 0);
 }
 
 export function loadConfig(): Config {
