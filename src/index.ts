@@ -7,6 +7,11 @@ import { deriveBotKeypair } from "./crypto/keys.js";
 import { KeystoneClient } from "./grpc/client.js";
 import { MCP_VERSION, KEYSTONE_PROTOCOL_VERSION, PF_PTR_VERSION } from "./version.js";
 import { startPingInterval } from "./liveness/ping.js";
+import {
+  resolveStartupMode,
+  loadWalletConfig,
+  StartupConfigError,
+} from "./startup.js";
 
 // Tool implementations
 import {
@@ -41,19 +46,23 @@ import {
 } from "./tools/get_attachment.js";
 
 async function main() {
-  // Try to load configuration -- if BOT_SEED is not set, the server starts
-  // in setup mode with only create_wallet available.
+  // If neither BOT_SEED nor BOT_SEED_FILE is set, the server starts in setup
+  // mode with only create_wallet available. If either is set but the config
+  // cannot be loaded, resolveStartupMode throws a StartupConfigError and the
+  // server exits with the reason (see main().catch below).
   let config: ReturnType<typeof loadConfig> | null = null;
   let keypair: Awaited<ReturnType<typeof deriveBotKeypair>> | null = null;
   let grpcClient: KeystoneClient | null = null;
   let setupMode = false;
   let stopPing: (() => void) | null = null;
 
-  try {
-    config = loadConfig();
-    keypair = await deriveBotKeypair(config.botSeed);
-    grpcClient = new KeystoneClient(config);
-  } catch {
+  const startup = await resolveStartupMode(process.env, async () => {
+    const loaded = await loadWalletConfig(process.env);
+    return { ...loaded, grpcClient: new KeystoneClient(loaded.config) };
+  });
+  if (startup.mode === "full") {
+    ({ config, keypair, grpcClient } = startup.value);
+  } else {
     setupMode = true;
   }
 
@@ -445,6 +454,11 @@ async function main() {
 }
 
 main().catch((err) => {
-  process.stderr.write(`Fatal error: ${err.message}\n`);
+  if (err instanceof StartupConfigError) {
+    // Already "Fatal configuration error: <cause>", seed redacted.
+    process.stderr.write(`${err.message}\n`);
+  } else {
+    process.stderr.write(`Fatal error: ${err.message}\n`);
+  }
   process.exit(1);
 });
