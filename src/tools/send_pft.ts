@@ -20,6 +20,18 @@ export const sendPftSchema = z.object({
 export type SendPftParams = z.infer<typeof sendPftSchema>;
 
 /**
+ * Format a drop amount as PFT with exactly six fractional digits, using BigInt
+ * quotient/remainder so amounts above Number.MAX_SAFE_INTEGER stay exact
+ * (1 PFT = 1,000,000 drops).
+ */
+export function formatDropsAsPft(drops: bigint | string): string {
+  const value = BigInt(drops);
+  const whole = value / 1_000_000n;
+  const fraction = value % 1_000_000n;
+  return `${whole}.${fraction.toString().padStart(6, "0")}`;
+}
+
+/**
  * Send PFT to an address without attaching a message.
  * Lightweight transfer for payments, tipping, and funding other wallets.
  */
@@ -80,7 +92,7 @@ export async function executeSendPft(
     prepared.txJson
   );
 
-  const pftSent = (parseInt(amountDrops, 10) / 1_000_000).toFixed(6);
+  const pftSent = formatDropsAsPft(amountDrops);
 
   return JSON.stringify(
     {

@@ -12,7 +12,7 @@ vi.mock("../../chain/submitter.js", () => ({
 }));
 
 import { preparePayment, signAndSubmit } from "../../chain/submitter.js";
-import { executeSendPft } from "../../tools/send_pft.js";
+import { executeSendPft, formatDropsAsPft } from "../../tools/send_pft.js";
 
 const mockPrepare = vi.mocked(preparePayment);
 const mockSubmit = vi.mocked(signAndSubmit);
@@ -117,5 +117,36 @@ describe("executeSendPft amount selection", () => {
   it("uses amount_pft when both are provided", async () => {
     await send({ amount_pft: "2", amount_drops: "5" });
     expect(mockPrepare.mock.calls[0][3]).toBe("2000000");
+  });
+});
+
+describe("executeSendPft receipt amount_pft", () => {
+  // Number(amountDrops) loses precision above Number.MAX_SAFE_INTEGER, so the
+  // receipt must be formatted from BigInt quotient/remainder.
+  it.each([
+    ["9007199254740993", "9007199254.740993"],
+    ["99999999999999999", "99999999999.999999"],
+    ["100000000000000000", "100000000000.000000"],
+    ["1", "0.000001"],
+    ["1000000", "1.000000"],
+  ])("reports amount_drops %s as amount_pft %s", async (drops, pft) => {
+    const out = JSON.parse(await send({ amount_drops: drops }));
+    expect(mockPrepare.mock.calls[0][3]).toBe(drops);
+    expect(out.amount_drops).toBe(drops);
+    expect(out.amount_pft).toBe(pft);
+  });
+
+  it.each([
+    ["10.5", "10.500000"],
+    ["0.000001", "0.000001"],
+    ["99999999999.999999", "99999999999.999999"],
+  ])("round-trips amount_pft %j as %s", async (input, pft) => {
+    const out = JSON.parse(await send({ amount_pft: input }));
+    expect(out.amount_pft).toBe(pft);
+  });
+
+  it("formatDropsAsPft accepts bigint and string drops", () => {
+    expect(formatDropsAsPft(9007199254740993n)).toBe("9007199254.740993");
+    expect(formatDropsAsPft("10500000")).toBe("10.500000");
   });
 });
