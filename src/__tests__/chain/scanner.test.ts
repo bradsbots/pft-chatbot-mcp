@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { scanMessages } from "../../chain/scanner.js";
+import { executeScanMessages } from "../../tools/scan_messages.js";
+import type { BotKeypair } from "../../crypto/keys.js";
 import { buildPfPointerMemo } from "../../chain/pointer.js";
 import type { Config } from "../../config.js";
 
@@ -22,6 +24,23 @@ async function chatTx(ledger: number, n: number, sender = PEER) {
     meta: { TransactionResult: "tesSUCCESS" },
     ledger_index: ledger,
   };
+}
+
+/** A successful transaction that is not a chat message (no memo). */
+function plainTx(ledger: number, n: number, type = "Payment") {
+  return {
+    tx: { TransactionType: type, Account: PEER, Destination: BOT, Amount: "1", hash: `PLAIN-${ledger}-${n}` },
+    meta: { TransactionResult: "tesSUCCESS" },
+    ledger_index: ledger,
+  };
+}
+
+/** A Payment carrying a pf.ptr memo whose data cannot be decoded. */
+async function garbledTx(ledger: number, n: number) {
+  const t = await chatTx(ledger, n);
+  t.tx.Memos[0].Memo.MemoData = "ff";
+  t.tx.hash = `GARBLED-${ledger}-${n}`;
+  return t;
 }
 
 /** Mock fetch serving account_tx pages; records each request's params. */
@@ -89,5 +108,68 @@ describe("scanMessages paging", () => {
     expect(requests).toHaveLength(10);
     expect(result.truncated).toBe(true);
     expect(result.messages).toHaveLength(10);
+  });
+});
+
+describe("scanMessages raw-window cursor metadata", () => {
+  it("reports the last scanned ledger from non-message and undecodable transactions", async () => {
+    mockAccountTx([
+      {
+        transactions: [plainTx(601, 1, "TrustSet"), await garbledTx(605, 1), plainTx(612, 1)],
+        marker: { ledger: 612, seq: 1 },
+      },
+    ]);
+    const result = await scanMessages(config, BOT, { sinceLedger: 500, limit: 3 });
+    expect(result.messages).toHaveLength(0);
+    expect(result.truncated).toBe(true);
+    expect(result.lastScannedLedger).toBe(612);
+  });
+
+  it("counts non-message transactions after an earlier message", async () => {
+    mockAccountTx([{ transactions: [await chatTx(501, 1), plainTx(520, 1), plainTx(540, 1, "OfferCreate")] }]);
+    const result = await scanMessages(config, BOT, { sinceLedger: 500 });
+    expect(result.messages.map((m) => m.ledgerIndex)).toEqual([501]);
+    expect(result.lastScannedLedger).toBe(540);
+  });
+
+  it("is null when the window is empty", async () => {
+    mockAccountTx([{ transactions: [] }]);
+    const result = await scanMessages(config, BOT, { sinceLedger: 500 });
+    expect(result.lastScannedLedger).toBeNull();
+  });
+});
+
+describe("scan_messages cursor across account_tx pages (end to end)", () => {
+  const keypair = { address: BOT } as unknown as BotKeypair;
+
+  it("advances past a full page with no decodable messages and reaches the message after it", async () => {
+    const requests = mockAccountTx([
+      { transactions: [plainTx(501, 1), await garbledTx(503, 1)], marker: { ledger: 503, seq: 1 } },
+      { transactions: [await chatTx(504, 1)] },
+    ]);
+    const first = JSON.parse(await executeScanMessages(config, keypair, { since_ledger: 500, limit: 2 }));
+    expect(first.count).toBe(0);
+    expect(first.truncated).toBe(true);
+    expect(first.next_cursor).toBe(503);
+    const second = JSON.parse(await executeScanMessages(config, keypair, { since_ledger: first.next_cursor, limit: 2 }));
+    expect(requests[1].ledger_index_min).toBe(503);
+    expect(second.messages.map((m: any) => m.tx_hash)).toEqual(["HASH-504-1"]);
+  });
+
+  it("keeps the rest of a ledger reachable when the marker stops partway through it", async () => {
+    // Ledger 502 holds three messages; a limit of 2 stops after 501 and 502#1.
+    const requests = mockAccountTx([
+      { transactions: [await chatTx(501, 1), await chatTx(502, 1)], marker: { ledger: 502, seq: 1 } },
+      { transactions: [await chatTx(502, 1), await chatTx(502, 2), await chatTx(502, 3)] },
+    ]);
+    const first = JSON.parse(await executeScanMessages(config, keypair, { since_ledger: 500, limit: 2 }));
+    expect(first.truncated).toBe(true);
+    expect(first.next_cursor).toBe(502);
+    const second = JSON.parse(await executeScanMessages(config, keypair, { since_ledger: first.next_cursor, limit: 10 }));
+    expect(requests[1].ledger_index_min).toBe(502);
+    const seen = new Set([...first.messages, ...second.messages].map((m: any) => m.tx_hash));
+    expect([...seen].sort()).toEqual(["HASH-501-1", "HASH-502-1", "HASH-502-2", "HASH-502-3"]);
+    expect(second.truncated).toBe(false);
+    expect(second.next_cursor).toBe(503);
   });
 });

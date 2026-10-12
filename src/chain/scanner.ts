@@ -142,6 +142,15 @@ export interface ScanResult {
    * highest ledger index returned (inclusive) to pick them up.
    */
   truncated: boolean;
+  /**
+   * Highest ledger index of any transaction in the raw account_tx window,
+   * whether or not it produced a message: non-Payment, failed, memo-less and
+   * undecodable transactions all count. With a `sinceLedger` cursor the window
+   * is read oldest-first, so this is the last scanned ledger. Null when the
+   * window held no transactions. Cursors must be derived from this, not from
+   * `messages`, or a window with no decodable messages never advances.
+   */
+  lastScannedLedger: number | null;
 }
 
 /**
@@ -161,10 +170,19 @@ export async function scanMessages(
   );
 
   const messages: ScannedMessage[] = [];
+  let lastScannedLedger: number | null = null;
 
   for (const entry of txs) {
     const tx = entry.tx || entry.tx_json;
     const meta = entry.meta || entry.metadata;
+
+    // Track the raw window before any filtering, so the cursor advances past
+    // transactions that are not (decodable) messages.
+    const entryLedger = Number(entry.ledger_index ?? tx?.ledger_index);
+    if (Number.isFinite(entryLedger) && entryLedger > 0) {
+      lastScannedLedger =
+        lastScannedLedger == null ? entryLedger : Math.max(lastScannedLedger, entryLedger);
+    }
 
     if (!tx || !meta) continue;
 
@@ -264,7 +282,7 @@ export async function scanMessages(
     }
   }
 
-  return { messages, truncated };
+  return { messages, truncated, lastScannedLedger };
 }
 
 /**

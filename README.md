@@ -185,7 +185,7 @@ Scans recent transactions on the bot's wallet for incoming/outgoing messages. Re
 - `messages` -- array of message objects, each with `tx_hash`, `sender`, `recipient`, `direction`, `amount_drops` (PFT in drops), `amount_pft` (PFT in whole units), `issued_currency` (for non-PFT tokens, or `null`), `cid`, `thread_id`, `is_encrypted`, `ledger_index`, `timestamp_iso`
 - `count` -- number of messages found
 - `next_cursor` -- ledger index to pass as `since_ledger` on the next call (for deduplication)
-- `truncated` -- `true` when the window held more transactions than `limit` allowed, so some were not examined; `next_cursor` then resumes from the highest scanned ledger inclusively (deduplicate by `tx_hash`) instead of skipping past the unread ones
+- `truncated` -- `true` when the window held more transactions than `limit` allowed, so some were not examined; `next_cursor` then resumes from the highest scanned ledger inclusively (deduplicate by `tx_hash`) instead of skipping past the unread ones. The cursor is computed from every scanned transaction, including non-message and undecodable ones, so a window with no matching messages still advances it
 
 ---
 
