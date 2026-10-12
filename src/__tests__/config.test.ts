@@ -183,6 +183,25 @@ describe("loadConfig – PING_INTERVAL_MS", () => {
     expect(warnings.join("")).toContain("Invalid PING_INTERVAL_MS=");
   });
 
+  // Node clamps any timer delay above 2^31-1 ms to 1 ms (TimeoutOverflowWarning),
+  // so a syntactically valid but oversized interval would hot-loop the pinger.
+  it("accepts the Node timer ceiling PING_INTERVAL_MS=2147483647", async () => {
+    process.env.PING_INTERVAL_MS = "2147483647";
+    const config = await freshLoadConfig();
+    expect(config.pingIntervalMs).toBe(2_147_483_647);
+    expect(warnings.join("")).not.toContain("Invalid");
+  });
+
+  it.each(["2147483648", "9007199254740991"])(
+    "warns and keeps the default above the Node timer ceiling: PING_INTERVAL_MS=%s",
+    async (value) => {
+      process.env.PING_INTERVAL_MS = value;
+      const config = await freshLoadConfig();
+      expect(config.pingIntervalMs).toBe(900_000);
+      expect(warnings.join("")).toContain(`Invalid PING_INTERVAL_MS="${value}"`);
+    }
+  );
+
   it("accepts whole-token digits, padding and a zero interval", async () => {
     process.env.PING_INTERVAL_MS = " 60000 ";
     let config = await freshLoadConfig();
