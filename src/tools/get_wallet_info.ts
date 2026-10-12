@@ -3,6 +3,16 @@ import type { Config } from "../config.js";
 import type { BotKeypair } from "../crypto/keys.js";
 import { getAccountInfo, getAccountLines } from "../chain/scanner.js";
 
+/**
+ * Format a drops string as PFT with exactly 6 decimals, using BigInt so balances
+ * above 2^53 drops are not rounded. Non-digit input is returned unchanged.
+ */
+function formatDropsAsPft(drops: string): string {
+  if (!/^\d+$/.test(drops)) return drops;
+  const d = BigInt(drops);
+  return `${d / 1_000_000n}.${(d % 1_000_000n).toString().padStart(6, "0")}`;
+}
+
 export const getWalletInfoSchema = z.object({});
 
 export type GetWalletInfoParams = z.infer<typeof getWalletInfoSchema>;
@@ -21,7 +31,7 @@ export async function executeGetWalletInfo(
   ]);
 
   const balanceDrops = accountInfo.balance;
-  const balancePft = (parseInt(balanceDrops, 10) / 1_000_000).toFixed(6);
+  const balancePft = formatDropsAsPft(balanceDrops);
 
   // Determine PFT trust line status
   const pftTrustLine = trustLines.find(
