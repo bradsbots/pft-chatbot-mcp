@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { scanMessages } from "../../chain/scanner.js";
-import { executeScanMessages } from "../../tools/scan_messages.js";
+import { executeScanMessages, encodeCursorToken } from "../../tools/scan_messages.js";
 import type { BotKeypair } from "../../crypto/keys.js";
 import { buildPfPointerMemo } from "../../chain/pointer.js";
 import type { Config } from "../../config.js";
@@ -171,5 +171,168 @@ describe("scan_messages cursor across account_tx pages (end to end)", () => {
     expect([...seen].sort()).toEqual(["HASH-501-1", "HASH-502-1", "HASH-502-2", "HASH-502-3"]);
     expect(second.truncated).toBe(false);
     expect(second.next_cursor).toBe(503);
+  });
+});
+
+/**
+ * A fake rippled account_tx that honours forward, ledger_index_min, limit and
+ * marker the way rippled does: pages are oldest-first with `forward: true`,
+ * non-admin limits are clamped to [10, 400] (Tuning.h kAccountTx), `maxPage`
+ * lets a page come back shorter than asked, the marker is {ledger, seq} of
+ * the next unread transaction, and an unknown marker is an error.
+ */
+function fakeNode(ledgers: Array<[number, number]>, opts: { maxPage?: number } = {}) {
+  const all: Array<{ ledger: number; seq: number; entry: any }> = [];
+  for (const [ledger, count] of ledgers) {
+    for (let seq = 0; seq < count; seq++) {
+      all.push({ ledger, seq, entry: plainTx(ledger, seq) });
+    }
+  }
+  const requests: any[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init: any) => {
+      const p = JSON.parse(init.body).params[0];
+      requests.push(p);
+      expect(p.forward).toBe(true);
+      const window = all.filter((t) => t.ledger >= (p.ledger_index_min ?? 0));
+      let start = 0;
+      if (p.marker !== undefined) {
+        start = window.findIndex((t) => t.ledger === p.marker?.ledger && t.seq === p.marker?.seq);
+        if (start < 0) {
+          return { ok: true, json: async () => ({ result: { error: "invalidParams", error_message: "invalid marker" } }) };
+        }
+      }
+      const size = Math.min(Math.max(10, Math.min(400, p.limit)), opts.maxPage ?? Infinity);
+      const page = window.slice(start, start + size);
+      const next = window[start + size];
+      return {
+        ok: true,
+        json: async () => ({
+          result: { transactions: page.map((t) => t.entry), ...(next ? { marker: { ledger: next.ledger, seq: next.seq } } : {}) },
+        }),
+      };
+    })
+  );
+  return { requests, hashes: all.map((t) => t.entry.tx.hash as string) };
+}
+
+const decodeToken = (token: string) => JSON.parse(Buffer.from(token, "base64url").toString("utf8"));
+
+/** Call scan_messages, then keep passing next_cursor_token back as cursor until none is returned. */
+async function chainTokens(firstParams: { since_ledger: number; limit: number; direction?: "both" }, maxCalls = 10) {
+  const keypair = { address: BOT } as unknown as BotKeypair;
+  const outputs: any[] = [];
+  let params: any = firstParams;
+  for (let i = 0; i < maxCalls; i++) {
+    const out = JSON.parse(await executeScanMessages(config, keypair, params));
+    outputs.push(out);
+    if (!out.next_cursor_token) break;
+    params = { cursor: out.next_cursor_token, limit: firstParams.limit, direction: firstParams.direction };
+  }
+  return outputs;
+}
+
+describe("scan_messages continuation token over account_tx markers (end to end)", () => {
+  it("reviewer regression: more than 200 transactions in since_ledger at limit=200 are each scanned exactly once", async () => {
+    // 450 transactions, all in ledger 500; limit is at the schema maximum.
+    const node = fakeNode([[500, 450]]);
+    const outputs = await chainTokens({ since_ledger: 500, limit: 200 });
+    expect(outputs).toHaveLength(3);
+    expect(outputs.map((o) => o.truncated)).toEqual([true, true, false]);
+    expect(outputs[0].next_cursor).toBe(500); // since_ledger alone cannot move
+    expect(outputs[0].hint).toContain("cursor=next_cursor_token");
+    expect(outputs[0].hint).not.toContain("larger limit");
+    expect(outputs[2].next_cursor_token).toBeNull();
+    expect(outputs[2].next_cursor).toBe(501);
+    // Every request keeps the same window; follow-ups replay the node's marker.
+    expect(node.requests.every((r) => r.ledger_index_min === 500 && r.forward === true)).toBe(true);
+    expect(node.requests.map((r) => r.marker)).toEqual([undefined, { ledger: 500, seq: 200 }, { ledger: 500, seq: 400 }]);
+    // The three windows tile the ledger: [0,200), [200,400), [400,450).
+    const starts = node.requests.map((r) => (r.marker ? r.marker.seq : 0));
+    expect(starts).toEqual([0, 200, 400]);
+  });
+
+  it("reviewer regression with chat messages: every message comes back exactly once, in order", async () => {
+    const all = await Promise.all(Array.from({ length: 450 }, (_, n) => chatTx(500, n)));
+    const requests: any[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: any) => {
+        const p = JSON.parse(init.body).params[0];
+        requests.push(p);
+        const start = p.marker ? p.marker.seq : 0;
+        const size = Math.max(10, Math.min(400, p.limit));
+        const next = start + size < all.length ? { ledger: 500, seq: start + size } : undefined;
+        return {
+          ok: true,
+          json: async () => ({ result: { transactions: all.slice(start, start + size), ...(next ? { marker: next } : {}) } }),
+        };
+      })
+    );
+    const outputs = await chainTokens({ since_ledger: 500, limit: 200 });
+    expect(outputs).toHaveLength(3);
+    const hashes = outputs.flatMap((o) => o.messages.map((m: any) => m.tx_hash));
+    expect(hashes).toHaveLength(450);
+    expect(new Set(hashes).size).toBe(450);
+    expect(hashes).toEqual(all.map((t) => t.tx.hash));
+    expect(requests.every((r) => r.ledger_index_min === 500)).toBe(true);
+  });
+
+  it("carries a token across into later ledgers without skipping or repeating", async () => {
+    const node = fakeNode([[500, 150], [501, 100], [502, 30]]);
+    const outputs = await chainTokens({ since_ledger: 500, limit: 200 });
+    expect(outputs).toHaveLength(2);
+    expect(outputs[0].truncated).toBe(true);
+    expect(outputs[0].next_cursor).toBe(501); // stopped partway through 501
+    expect(decodeToken(outputs[0].next_cursor_token)).toEqual({
+      v: 1,
+      account: BOT,
+      ledger_index_min: 500,
+      marker: { ledger: 501, seq: 50 },
+    });
+    expect(node.requests[1]).toMatchObject({ ledger_index_min: 500, limit: 200, forward: true, marker: { ledger: 501, seq: 50 } });
+    expect(outputs[1].truncated).toBe(false);
+    expect(outputs[1].next_cursor).toBe(503);
+    expect(outputs[1].next_cursor_token).toBeNull();
+  });
+
+  it("keeps the marker exact when the node returns more than a later page asked for", async () => {
+    // Pages come back at most 195 long, so the follow-up page asks for 5 and
+    // the node raises that to its minimum of 10. That page is dropped and
+    // re-read on the next call instead of being sliced.
+    const node = fakeNode([[500, 260]], { maxPage: 195 });
+    const outputs = await chainTokens({ since_ledger: 500, limit: 200 });
+    expect(node.requests.slice(0, 2).map((r) => r.limit)).toEqual([200, 5]);
+    expect(outputs[0].truncated).toBe(true);
+    expect(decodeToken(outputs[0].next_cursor_token).marker).toEqual({ ledger: 500, seq: 195 });
+    expect(outputs.at(-1).truncated).toBe(false);
+    // Each call starts exactly where the previous token pointed: contiguous coverage.
+    const tokenSeqs = outputs.slice(0, -1).map((o) => decodeToken(o.next_cursor_token).marker.seq);
+    const resumedFrom = node.requests.filter((r) => r.marker && r.limit === 200).map((r) => r.marker.seq);
+    expect(resumedFrom).toEqual(tokenSeqs);
+  });
+
+  it("the since_ledger-only flow is unchanged: same requests, cursor and truncation", async () => {
+    const node = fakeNode([[500, 5], [501, 5], [502, 3]]);
+    const keypair = { address: BOT } as unknown as BotKeypair;
+    const first = JSON.parse(await executeScanMessages(config, keypair, { since_ledger: 500, limit: 12 }));
+    expect(node.requests[0]).toEqual({ account: BOT, limit: 12, forward: true, ledger_index_min: 500 });
+    expect(first.truncated).toBe(true);
+    expect(first.next_cursor).toBe(502); // inclusive, as before
+    const second = JSON.parse(await executeScanMessages(config, keypair, { since_ledger: first.next_cursor, limit: 12 }));
+    expect(node.requests[1]).toEqual({ account: BOT, limit: 12, forward: true, ledger_index_min: 502 });
+    expect(second.truncated).toBe(false);
+    expect(second.next_cursor).toBe(503);
+    expect(second.next_cursor_token).toBeNull();
+  });
+
+  it("reports the node's rejection of an expired or foreign marker with a fallback", async () => {
+    fakeNode([[500, 20]]);
+    const keypair = { address: BOT } as unknown as BotKeypair;
+    const stale = encodeCursorToken({ account: BOT, ledger_index_min: 500, marker: { ledger: 500, seq: 999 } });
+    await expect(executeScanMessages(config, keypair, { cursor: stale })).rejects.toThrow(
+      /invalid marker\. The node did not accept the continuation cursor/
+    );
   });
 });

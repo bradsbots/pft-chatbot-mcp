@@ -178,6 +178,7 @@ Scans recent transactions on the bot's wallet for incoming/outgoing messages. Re
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `since_ledger` | `number` | No | - | Only return messages from this ledger index onwards (use `next_cursor` from previous scan) |
+| `cursor` | `string` | No | - | Opaque continuation token: `next_cursor_token` from a previous scan. Resumes exactly after the last scanned transaction, even partway through a ledger. If `since_ledger` is also passed it must equal the token's window |
 | `limit` | `number` | No | `100` | Max transactions to scan (1-200) |
 | `direction` | `string` | No | `"inbound"` | Filter: `"inbound"`, `"outbound"`, or `"both"` |
 
@@ -186,6 +187,9 @@ Scans recent transactions on the bot's wallet for incoming/outgoing messages. Re
 - `count` -- number of messages found
 - `next_cursor` -- ledger index to pass as `since_ledger` on the next call (for deduplication)
 - `truncated` -- `true` when the window held more transactions than `limit` allowed, so some were not examined; `next_cursor` then resumes from the highest scanned ledger inclusively (deduplicate by `tx_hash`) instead of skipping past the unread ones. The cursor is computed from every scanned transaction, including non-message and undecodable ones, so a window with no matching messages still advances it
+- `next_cursor_token` -- when a `since_ledger` scan is truncated, an opaque token to pass as `cursor` on the next call; `null` once the window has been read to the end. A ledger index cannot point inside a ledger, so if more than `limit` transactions share the `since_ledger` ledger, `next_cursor` cannot advance without skipping the rest of that ledger. Chaining `cursor=next_cursor_token` reads every transaction exactly once with no deduplication needed.
+
+  The token is base64url JSON `{v, account, ledger_index_min, marker}` that wraps the node's `account_tx` marker together with the query it belongs to. An XRPL-style marker is valid only for the same `account_tx` parameters, so the token fixes the account and `ledger_index_min`. Tokens are validated strictly, and a bad encoding, an unknown version, unexpected fields, another account or a `since_ledger` mismatch is rejected with an `Invalid cursor:` error. Treat tokens as short-lived: XRPL documents markers as [ephemeral and possibly invalid after 10 minutes](https://xrpl.org/docs/references/http-websocket-apis/api-conventions/markers-and-pagination). If a node rejects one, resume with `since_ledger=next_cursor` and deduplicate by `tx_hash`. Tokens are only issued for `since_ledger` scans, because a scan without `since_ledger` reads newest-first and its marker would page backwards.
 
 ---
 

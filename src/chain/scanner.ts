@@ -101,28 +101,53 @@ const MAX_ACCOUNT_TX_PAGES = 10;
  * Fetch up to `limit` transactions, following account_tx markers across
  * pages. `truncated` is true when more transactions remained unread (the
  * node still returned a marker when the limit or page bound was reached).
+ *
+ * `startMarker` resumes an earlier scan exactly where it stopped. Markers are
+ * opaque, ephemeral, and valid only for the same query parameters (account,
+ * ledger_index_min, forward), so the caller must pass the `ledgerIndexMin`
+ * the marker was issued for. The returned `marker` is the node's resume point
+ * just after the last returned transaction, or undefined once the window has
+ * been read to the end.
+ *
+ * The node does not have to honour `limit`; rippled raises a non-admin
+ * account_tx limit to at least 10. A page can therefore hold more
+ * transactions than were requested. Slicing it would leave the node's marker
+ * pointing past transactions nobody examined, so on any page after the first
+ * the over-long page is dropped and the previous marker kept, and the page is
+ * re-read on the next call. On the first page the whole page is kept, so a
+ * `limit` below the node's minimum scans that minimum.
+ *
+ * References: https://xrpl.org/docs/references/http-websocket-apis/api-conventions/markers-and-pagination
+ * (marker format intentionally undefined, ephemeral, may not work after 10
+ * minutes); account_tx `limit` ("The server is not required to honor this
+ * value"); rippled src/xrpld/rpc/detail/Tuning.h kAccountTx {10, 200, 400}.
  */
 async function accountTx(
   rpcUrl: string,
   account: string,
   limit: number = 100,
-  ledgerIndexMin?: number
-): Promise<{ transactions: any[]; truncated: boolean }> {
+  ledgerIndexMin?: number,
+  startMarker?: unknown
+): Promise<{ transactions: any[]; truncated: boolean; marker: unknown }> {
   const transactions: any[] = [];
-  let marker: unknown = undefined;
+  let marker: unknown = startMarker;
   for (let page = 0; page < MAX_ACCOUNT_TX_PAGES; page++) {
     const remaining = limit - transactions.length;
     if (remaining <= 0) {
-      return { transactions, truncated: marker != null };
+      return { transactions, truncated: marker != null, marker };
     }
     const result = await accountTxPage(rpcUrl, account, remaining, ledgerIndexMin, marker);
+    if (page > 0 && result.transactions.length > remaining) {
+      // Over-long later page: keep the marker that requested it; read it next call.
+      return { transactions, truncated: true, marker };
+    }
     transactions.push(...result.transactions);
     marker = result.marker;
     if (marker == null || result.transactions.length === 0) {
-      return { transactions: transactions.slice(0, limit), truncated: false };
+      return { transactions, truncated: false, marker: undefined };
     }
   }
-  return { transactions: transactions.slice(0, limit), truncated: marker != null };
+  return { transactions, truncated: marker != null, marker };
 }
 
 /**
@@ -151,6 +176,14 @@ export interface ScanResult {
    * `messages`, or a window with no decodable messages never advances.
    */
   lastScannedLedger: number | null;
+  /**
+   * The account_tx marker this scan stopped at, or null when the window was
+   * read to the end. Passing it back as `options.marker` with the same
+   * `sinceLedger` continues from exactly the next unread transaction, even in
+   * the middle of a ledger. It is opaque and only valid for the same query
+   * parameters.
+   */
+  resumeMarker: unknown;
 }
 
 /**
@@ -160,13 +193,14 @@ export interface ScanResult {
 export async function scanMessages(
   config: Config,
   botAddress: string,
-  options: { sinceLedger?: number; limit?: number } = {}
+  options: { sinceLedger?: number; limit?: number; marker?: unknown } = {}
 ): Promise<ScanResult> {
-  const { transactions: txs, truncated } = await accountTx(
+  const { transactions: txs, truncated, marker } = await accountTx(
     config.pftlRpcUrl,
     botAddress,
     options.limit || 100,
-    options.sinceLedger
+    options.sinceLedger,
+    options.marker
   );
 
   const messages: ScannedMessage[] = [];
@@ -282,7 +316,7 @@ export async function scanMessages(
     }
   }
 
-  return { messages, truncated, lastScannedLedger };
+  return { messages, truncated, lastScannedLedger, resumeMarker: marker ?? null };
 }
 
 /**

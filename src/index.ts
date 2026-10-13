@@ -89,9 +89,10 @@ async function main() {
   if (config && keypair && grpcClient) {
     server.tool(
       "scan_messages",
-      "Scan the bot's PFTL wallet for recent incoming messages. Returns metadata (sender, amount, CID, thread) without decrypting content. Use get_message to read full content.",
+      "Scan the bot's PFTL wallet for recent incoming messages. Returns metadata (sender, amount, CID, thread) without decrypting content. Use get_message to read full content. To page: pass next_cursor as since_ledger, or, when the result is truncated, pass next_cursor_token as cursor to resume exactly after the last scanned transaction.",
       {
         since_ledger: scanMessagesSchema.shape.since_ledger,
+        cursor: scanMessagesSchema.shape.cursor,
         limit: scanMessagesSchema.shape.limit,
         direction: scanMessagesSchema.shape.direction,
       },
