@@ -55,22 +55,25 @@ function scriptedMethod(outcomes: Array<grpc.ServiceError | { ok: unknown }>) {
  * retry path touches are populated; `buildServices` is stubbed so channel
  * recreation can be observed without protobuf loading.
  */
-function fakeClient(stubs: { agentRegistry?: object; authService?: object; contentStorage?: object }) {
+function fakeClient(
+  stubs: { agentRegistry?: object; authService?: object; contentStorage?: object; envelopeStorage?: object },
+  options: { maxAttempts?: number; recreateAfter?: number } = {}
+) {
   const client = Object.create(KeystoneClient.prototype) as KeystoneClient;
   const buildServices = vi.fn(() => {
     Object.assign(client, {
       agentRegistry: stubs.agentRegistry ?? {},
       authService: stubs.authService ?? {},
       contentStorage: stubs.contentStorage ?? {},
-      envelopeStorage: {},
+      envelopeStorage: stubs.envelopeStorage ?? {},
     });
   });
   Object.assign(client, {
     apiKey: null,
     target: "fake:0",
     credentials: grpc.credentials.createInsecure(),
-    retryPolicy: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 2 },
-    recreateAfter: 2,
+    retryPolicy: { maxAttempts: options.maxAttempts ?? 3, baseDelayMs: 1, maxDelayMs: 2 },
+    recreateAfter: options.recreateAfter ?? 2,
     consecutiveTransientFailures: 0,
     buildServices,
   });
@@ -166,7 +169,7 @@ describe("KeystoneClient retry", () => {
     expect(client.transientFailureStreak).toBe(0);
   });
 
-  it("counts the failure streak across calls and resets it on success", async () => {
+  it("counts the terminal attempt toward the streak after a mid-sequence rebuild", async () => {
     const pingAgent = scriptedMethod([
       serviceError(grpc.status.RESOURCE_EXHAUSTED),
       serviceError(grpc.status.RESOURCE_EXHAUSTED),
@@ -175,9 +178,102 @@ describe("KeystoneClient retry", () => {
     const { client, buildServices } = fakeClient({ agentRegistry: { pingAgent } });
 
     await expect(client.pingAgent()).rejects.toMatchObject({ code: grpc.status.RESOURCE_EXHAUSTED });
-    // Three attempts: two retried failures (streak 1, 2 -> recreate at 2, reset to 0)
-    // and one final failure that is not retried.
+    // Three attempts, all counted: streak 1, 2 -> recreate at 2 (reset to 0),
+    // then the final, non-retried failure starts a new streak at 1.
     expect(pingAgent).toHaveBeenCalledTimes(3);
+    expect(buildServices).toHaveBeenCalledTimes(2);
+    expect(client.transientFailureStreak).toBe(1);
+  });
+
+  it("rebuilds exactly once when a default three-attempt read exhausts on UNAVAILABLE", async () => {
+    // Defaults: maxAttempts = 3, recreateAfter = 3. The third (terminal)
+    // failure must count, crossing the threshold inside this one call.
+    const pingAgent = scriptedMethod([
+      serviceError(grpc.status.UNAVAILABLE, "down 1"),
+      serviceError(grpc.status.UNAVAILABLE, "down 2"),
+      serviceError(grpc.status.UNAVAILABLE, "down 3"),
+    ]);
+    const { client, buildServices } = fakeClient({ agentRegistry: { pingAgent } }, { maxAttempts: 3, recreateAfter: 3 });
+    const recreate = vi.spyOn(client, "recreateChannels");
+
+    await expect(client.pingAgent()).rejects.toMatchObject({ code: grpc.status.UNAVAILABLE, details: "down 3" });
+
+    expect(pingAgent).toHaveBeenCalledTimes(3);
+    expect(recreate).toHaveBeenCalledTimes(1);
+    expect(buildServices).toHaveBeenCalledTimes(2); // initial build + one rebuild
+    expect(client.transientFailureStreak).toBe(0);
+  });
+
+  it("counts single-attempt non-idempotent failures toward one rebuild without retrying them", async () => {
+    const verifyAndIssueKey = scriptedMethod([serviceError(grpc.status.DEADLINE_EXCEEDED)]);
+    const storeEnvelope = scriptedMethod([serviceError(grpc.status.UNAVAILABLE)]);
+    const deleteAgentCard = scriptedMethod([serviceError(grpc.status.UNAVAILABLE, "read ECONNRESET")]);
+    const { client, buildServices } = fakeClient(
+      {
+        authService: { verifyAndIssueKey },
+        envelopeStorage: { storeEnvelope },
+        agentRegistry: { deleteAgentCard },
+      },
+      { maxAttempts: 3, recreateAfter: 3 }
+    );
+    const recreate = vi.spyOn(client, "recreateChannels");
+
+    await expect(client.verifyAndIssueKey("rAddr", "nonce", "sig", "label")).rejects.toMatchObject({
+      code: grpc.status.DEADLINE_EXCEEDED,
+    });
+    expect(client.transientFailureStreak).toBe(1);
+    await expect(client.storeEnvelope({})).rejects.toMatchObject({ code: grpc.status.UNAVAILABLE });
+    expect(client.transientFailureStreak).toBe(2);
+    expect(buildServices).toHaveBeenCalledTimes(1);
+    await expect(client.deleteAgentCard("agent-1")).rejects.toMatchObject({ code: grpc.status.UNAVAILABLE });
+
+    // No retries: each non-idempotent method was attempted exactly once.
+    expect(verifyAndIssueKey).toHaveBeenCalledTimes(1);
+    expect(storeEnvelope).toHaveBeenCalledTimes(1);
+    expect(deleteAgentCard).toHaveBeenCalledTimes(1);
+    // ...but all three failures counted, so the third crossed the threshold.
+    expect(recreate).toHaveBeenCalledTimes(1);
+    expect(buildServices).toHaveBeenCalledTimes(2);
+    expect(client.transientFailureStreak).toBe(0);
+  });
+
+  it("resets the streak on a success in the middle of a mixed sequence", async () => {
+    const pingAgent = scriptedMethod([
+      // Call 1: two transient failures, then success.
+      serviceError(grpc.status.UNAVAILABLE),
+      serviceError(grpc.status.UNAVAILABLE),
+      { ok: { lastPingAt: { seconds: "1", nanos: 0 } } },
+      // Call 3: one transient failure, then success.
+      serviceError(grpc.status.RESOURCE_EXHAUSTED),
+      { ok: { lastPingAt: { seconds: "3", nanos: 0 } } },
+      // Call 4: exhausts all three attempts.
+      serviceError(grpc.status.UNAVAILABLE),
+      serviceError(grpc.status.UNAVAILABLE),
+      serviceError(grpc.status.UNAVAILABLE),
+    ]);
+    const storeEnvelope = scriptedMethod([serviceError(grpc.status.DEADLINE_EXCEEDED)]);
+    const { client, buildServices } = fakeClient(
+      { agentRegistry: { pingAgent }, envelopeStorage: { storeEnvelope } },
+      { maxAttempts: 3, recreateAfter: 3 }
+    );
+
+    await expect(client.pingAgent()).resolves.toEqual({ lastPingAt: { seconds: "1", nanos: 0 } });
+    expect(client.transientFailureStreak).toBe(0);
+
+    // Call 2: non-idempotent transient failure, counted once and not retried.
+    await expect(client.storeEnvelope({})).rejects.toMatchObject({ code: grpc.status.DEADLINE_EXCEEDED });
+    expect(client.transientFailureStreak).toBe(1);
+
+    // Call 3: streak reaches 2, then the success resets it.
+    await expect(client.pingAgent()).resolves.toEqual({ lastPingAt: { seconds: "3", nanos: 0 } });
+    expect(client.transientFailureStreak).toBe(0);
+    // Four transient failures so far, but never three in a row: no rebuild.
+    expect(buildServices).toHaveBeenCalledTimes(1);
+
+    // Call 4: three consecutive failures cross the threshold on the terminal attempt.
+    await expect(client.pingAgent()).rejects.toMatchObject({ code: grpc.status.UNAVAILABLE });
+    expect(pingAgent).toHaveBeenCalledTimes(8);
+    expect(storeEnvelope).toHaveBeenCalledTimes(1);
     expect(buildServices).toHaveBeenCalledTimes(2);
     expect(client.transientFailureStreak).toBe(0);
   });

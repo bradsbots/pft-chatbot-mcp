@@ -92,8 +92,14 @@ export function backoffDelayMs(policy: RetryPolicy, attempt: number): number {
 }
 
 export interface RetryHooks {
-  /** Called after each failed attempt that will be retried. */
-  onTransientFailure?: (error: unknown, attempt: number) => void;
+  /**
+   * Called after every attempt that fails with a transient error, including
+   * the terminal attempt and calls whose policy allows only one attempt.
+   * `willRetry` reports the separate retry decision: true when another
+   * attempt follows, false when the error is about to be thrown. Permanent
+   * failures never reach this hook.
+   */
+  onTransientFailure?: (error: unknown, attempt: number, willRetry: boolean) => void;
   /** Called once the call finally succeeds. */
   onSuccess?: () => void;
   /** Injectable sleep for tests. */
@@ -107,6 +113,11 @@ const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(r
  *
  * `operation` receives the 1-based attempt number so callers can rebuild
  * state (for example, re-resolve a recreated gRPC client) on each attempt.
+ *
+ * Accounting and retrying are separate decisions: every transient failure is
+ * reported to `onTransientFailure` (so failure counters see the terminal
+ * attempt and single-attempt calls too), while only a transient failure with
+ * attempts remaining is retried.
  */
 export async function withRetry<T>(
   operation: (attempt: number) => Promise<T>,
@@ -120,9 +131,10 @@ export async function withRetry<T>(
       hooks.onSuccess?.();
       return result;
     } catch (error) {
-      const retriable = attempt < policy.maxAttempts && isTransientGrpcError(error);
-      if (!retriable) throw error;
-      hooks.onTransientFailure?.(error, attempt);
+      if (!isTransientGrpcError(error)) throw error;
+      const willRetry = attempt < policy.maxAttempts;
+      hooks.onTransientFailure?.(error, attempt, willRetry);
+      if (!willRetry) throw error;
       await sleep(backoffDelayMs(policy, attempt));
     }
   }

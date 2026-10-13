@@ -270,6 +270,10 @@ export class KeystoneClient {
    * Drop the current channels and build fresh stubs. Called automatically
    * after `KEYSTONE_GRPC_RECREATE_AFTER_FAILURES` consecutive transient
    * failures so a wedged HTTP/2 connection cannot poison every later call.
+   * Every transient failure counts, including the final attempt of an
+   * exhausted retry sequence and the single attempt of a non-idempotent
+   * call. Rebuilding resets the streak, so one threshold crossing triggers
+   * exactly one rebuild; any successful call also resets it.
    */
   recreateChannels(): void {
     this.close();
@@ -308,11 +312,14 @@ export class KeystoneClient {
         onSuccess: () => {
           this.consecutiveTransientFailures = 0;
         },
-        onTransientFailure: (error, attempt) => {
+        // Every transient failure counts toward the recreation threshold,
+        // including the terminal attempt and single-attempt (non-idempotent)
+        // calls. Whether to retry is decided separately by withRetry.
+        onTransientFailure: (error, attempt, willRetry) => {
           this.consecutiveTransientFailures += 1;
           const code = (error as Partial<grpc.ServiceError>).code;
           process.stderr.write(
-            `[grpc] WARN - ${methodName} attempt ${attempt} failed (code ${code ?? "n/a"}); retrying\n`
+            `[grpc] WARN - ${methodName} attempt ${attempt} failed (code ${code ?? "n/a"}); ${willRetry ? "retrying" : "not retrying"}\n`
           );
           if (this.consecutiveTransientFailures >= this.recreateAfter) {
             process.stderr.write(

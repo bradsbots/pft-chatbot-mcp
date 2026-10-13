@@ -141,6 +141,35 @@ describe("withRetry", () => {
     expect(sleep).toHaveBeenCalledTimes(2);
   });
 
+  it("reports every transient failure, including the terminal one, with the retry decision", async () => {
+    const operation = vi.fn().mockRejectedValue(serviceError(grpc.status.UNAVAILABLE));
+    const onTransientFailure = vi.fn();
+
+    await expect(
+      withRetry(operation, { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 1 }, { sleep: noSleep, onTransientFailure })
+    ).rejects.toMatchObject({ code: grpc.status.UNAVAILABLE });
+    expect(operation).toHaveBeenCalledTimes(3);
+    expect(onTransientFailure.mock.calls.map(([, attempt, willRetry]) => [attempt, willRetry])).toEqual([
+      [1, true],
+      [2, true],
+      [3, false],
+    ]);
+  });
+
+  it("reports a transient failure on a single-attempt policy without retrying", async () => {
+    const operation = vi.fn().mockRejectedValue(serviceError(grpc.status.DEADLINE_EXCEEDED));
+    const sleep = vi.fn<(ms: number) => Promise<void>>(async () => {});
+    const onTransientFailure = vi.fn();
+
+    await expect(
+      withRetry(operation, { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 }, { sleep, onTransientFailure })
+    ).rejects.toMatchObject({ code: grpc.status.DEADLINE_EXCEEDED });
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(onTransientFailure).toHaveBeenCalledTimes(1);
+    expect(onTransientFailure.mock.calls[0].slice(1)).toEqual([1, false]);
+  });
+
   it("makes exactly one attempt when maxAttempts is 1", async () => {
     const operation = vi.fn().mockRejectedValue(serviceError(grpc.status.UNAVAILABLE));
     await expect(

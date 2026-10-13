@@ -495,7 +495,7 @@ Most bots should use the default (fully shared) -- it enables server-side messag
 | `KEYSTONE_GRPC_RETRY_ATTEMPTS` | No | `3` | Attempts per gRPC unary call including the first (1–10). `1` disables retry. Only transient failures (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`, connection resets) are retried, and only for idempotent calls. |
 | `KEYSTONE_GRPC_RETRY_BASE_MS` | No | `250` | Delay before the first retry; doubles on each retry. |
 | `KEYSTONE_GRPC_RETRY_MAX_MS` | No | `5000` | Upper bound on the retry delay. |
-| `KEYSTONE_GRPC_RECREATE_AFTER_FAILURES` | No | `3` | Rebuild the gRPC channels after this many consecutive transient failures. |
+| `KEYSTONE_GRPC_RECREATE_AFTER_FAILURES` | No | `3` | Rebuild the gRPC channels after this many consecutive transient failures across all calls. Every transient failure counts, including the final attempt of a call that exhausts its retries and the single attempt of a non-idempotent call; any success resets the count. |
 | `PING_INTERVAL_MS` | No | `900000` (15 min) | Ping interval in ms. Set 0 to disable. |
 | `TASKNODE_ENCRYPTION_PUBKEY` | No | Testnet default | Base64-encoded X25519 public key for TaskNode message sharing. Set to `"none"` or `""` to disable. |
 

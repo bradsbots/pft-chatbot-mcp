@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **gRPC Retry with Backoff**: Keystone unary calls now retry transient failures (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`, connection resets) with exponential backoff, and the client rebuilds its gRPC channels after consecutive transient failures. Configurable via `KEYSTONE_GRPC_RETRY_ATTEMPTS`, `KEYSTONE_GRPC_RETRY_BASE_MS`, `KEYSTONE_GRPC_RETRY_MAX_MS`, and `KEYSTONE_GRPC_RECREATE_AFTER_FAILURES`. Non-idempotent calls (`verifyAndIssueKey`, `storeEnvelope`, `deleteAgentCard`) are never retried. Closes the retry half of #3; complements the per-call deadline in #6.
+- **gRPC Retry with Backoff**: Keystone unary calls now retry transient failures (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, `RESOURCE_EXHAUSTED`, connection resets) with exponential backoff, and the client rebuilds its gRPC channels after consecutive transient failures (every transient failure counts, including the final attempt and non-idempotent calls; any success resets the count). Configurable via `KEYSTONE_GRPC_RETRY_ATTEMPTS`, `KEYSTONE_GRPC_RETRY_BASE_MS`, `KEYSTONE_GRPC_RETRY_MAX_MS`, and `KEYSTONE_GRPC_RECREATE_AFTER_FAILURES`. Non-idempotent calls (`verifyAndIssueKey`, `storeEnvelope`, `deleteAgentCard`) are never retried. Closes the retry half of #3; complements the per-call deadline in #6.
 
 ## [0.5.1] - 2026-03-02
 
