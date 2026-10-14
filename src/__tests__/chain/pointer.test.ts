@@ -94,4 +94,48 @@ describe("buildKeystoneEnvelopeMemo", () => {
     const result = await extractCidFromCoreMessage(Buffer.alloc(0));
     expect(result).toBeNull();
   });
+
+  it("accepts an uppercase 64-hex digest and round-trips 32 hash bytes and the CID", async () => {
+    const hash = "AB".repeat(32);
+    const memo = await buildKeystoneEnvelopeMemo({
+      cid: TEST_CID,
+      contentHash: hash,
+      contentLength: 10,
+    });
+    const decoded = await decodeKeystoneEnvelope(memo.memoDataHex);
+    expect(decoded.contentHash.length).toBe(32);
+    expect(decoded.contentHash.toString("hex")).toBe(hash.toLowerCase());
+    expect(decoded.metadata?.cid).toBe(TEST_CID);
+    expect(await extractCidFromCoreMessage(decoded.message)).toBe(TEST_CID);
+  });
+
+  const refused: Array<[string, unknown, unknown]> = [
+    ["non-hex hash", "zz".repeat(32), TEST_CID],
+    ["odd-length hash", "abc", TEST_CID],
+    ["hex prefix then junk", "ab".repeat(4) + "zz" + "ab".repeat(27), TEST_CID],
+    ["63-hex hash", TEST_HASH.slice(0, 63), TEST_CID],
+    ["65-hex hash", TEST_HASH + "a", TEST_CID],
+    ["400-hex hash", "a".repeat(400), TEST_CID],
+    ["64-hex hash with trailing newline", TEST_HASH + "\n", TEST_CID],
+    ["0x-prefixed hash", "0x" + TEST_HASH, TEST_CID],
+    ["empty hash", "", TEST_CID],
+    ["null hash", null, TEST_CID],
+    ["number hash", 123, TEST_CID],
+    ["Buffer hash", Buffer.alloc(32, 0xab), TEST_CID],
+    ["array hash", [TEST_HASH], TEST_CID],
+    ["empty cid", TEST_HASH, ""],
+    ["whitespace-only cid", TEST_HASH, "   "],
+    ["leading-space cid", TEST_HASH, " " + TEST_CID],
+    ["trailing-newline cid", TEST_HASH, TEST_CID + "\n"],
+    ["ipfs://-prefixed cid", TEST_HASH, "ipfs://" + TEST_CID],
+    ["null cid", TEST_HASH, null],
+    ["number cid", TEST_HASH, 42],
+    ["undefined cid", TEST_HASH, undefined],
+  ];
+
+  it.each(refused)("refuses %s before encoding", async (_label, contentHash, cid) => {
+    await expect(
+      buildKeystoneEnvelopeMemo({ cid, contentHash, contentLength: 10 } as any)
+    ).rejects.toThrow(/Invalid Keystone envelope input/);
+  });
 });

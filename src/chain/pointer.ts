@@ -232,6 +232,27 @@ export async function buildKeystoneEnvelopeMemo(input: {
   memoFormatHex: string;
   memoDataHex: string;
 }> {
+  // Fail closed before anything is encoded: this memo is signed into an
+  // irreversible Payment, and Buffer.from(hex) silently truncates bad input.
+  if (
+    typeof input.contentHash !== "string" ||
+    !/^[0-9a-fA-F]{64}$/.test(input.contentHash)
+  ) {
+    throw new Error(
+      "Invalid Keystone envelope input: contentHash must be a 64-character hex SHA-256 digest"
+    );
+  }
+  if (
+    typeof input.cid !== "string" ||
+    input.cid.length === 0 ||
+    input.cid.trim() !== input.cid ||
+    input.cid.startsWith("ipfs://")
+  ) {
+    throw new Error(
+      "Invalid Keystone envelope input: cid must be a non-empty bare CID without whitespace padding or an ipfs:// prefix"
+    );
+  }
+
   await loadProtos();
 
   const contentHashBytes = Buffer.from(input.contentHash, "hex");
